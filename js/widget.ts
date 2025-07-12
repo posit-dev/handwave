@@ -132,7 +132,10 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       model.set("hands_data", columnarResults);
       model.set(
         "handedness",
-        results.multiHandedness?.map((hand) => [flipHand(hand.label), hand.score])
+        results.multiHandedness?.map((hand) => [
+          flipHand(hand.label),
+          hand.score,
+        ])
       );
       model.set("is_tracking", true);
 
@@ -167,22 +170,20 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     canvasCtx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
 
     // Only draw hand landmarks if debug is enabled
-    if (model.get("debug")) {
-      for (let landmarks of results.multiHandLandmarks ?? []) {
-        drawingUtils.drawConnectors(
-          canvasCtx,
-          landmarks,
-          handslib.HAND_CONNECTIONS,
-          {
-            color: "#00FF00",
-            lineWidth: 2,
-          }
-        );
-        drawingUtils.drawLandmarks(canvasCtx, landmarks, {
-          color: "#FFFFFF",
-          radius: 2,
-        });
-      }
+    for (let landmarks of results.multiHandLandmarks ?? []) {
+      drawingUtils.drawConnectors(
+        canvasCtx,
+        landmarks,
+        handslib.HAND_CONNECTIONS,
+        {
+          color: "#00FF00",
+          lineWidth: 2,
+        }
+      );
+      drawingUtils.drawLandmarks(canvasCtx, landmarks, {
+        color: "#FFFFFF",
+        radius: 2,
+      });
     }
 
     canvasCtx.restore();

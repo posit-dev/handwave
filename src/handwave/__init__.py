@@ -21,7 +21,7 @@ class HandwaveWidget(anywidget.AnyWidget):
     min_detection_confidence = traitlets.Float(0.5).tag(sync=True)
     min_tracking_confidence = traitlets.Float(0.5).tag(sync=True)
     precision = traitlets.Int(3).tag(sync=True)
-    debug = traitlets.Bool(True).tag(sync=True)
+    debug = traitlets.Bool(False).tag(sync=True)
     width = traitlets.Int(640).tag(sync=True)
     height = traitlets.Int(480).tag(sync=True)
 
