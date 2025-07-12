@@ -1,0 +1,32 @@
+.hand-tracking-container {
+	position: relative;
+	display: inline-block;
+}
+
+.hand-tracking-canvas {
+	border: 2px solid #333;
+	border-radius: 8px;
+	display: block;
+	max-width: 100%;
+}
+
+.hand-tracking-debug {
+	position: absolute;
+	top: 10px;
+	left: 10px;
+	background: rgba(0, 0, 0, 0.8);
+	color: white;
+	padding: 10px;
+	border-radius: 4px;
+	font-family: inherit;
+	font-size: 12px;
+}
+
+.hand-tracking-canvas.pinned {
+	position: fixed;
+	bottom: 20px;
+	right: 20px;
+	width: 320px;
+	height: 240px;
+	z-index: 1000;
+}
