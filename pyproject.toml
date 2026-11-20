@@ -9,7 +9,10 @@ dependencies = [
     "anywidget",
     "pandas>=2.3.1",
 ]
+requires-python = ">=3.10"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Posit", email = "info@posit.co" }]
 
 # For projects not using `uv`, you can install these development dependencies with:
 # `pip install -e ".[dev]"`

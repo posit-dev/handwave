@@ -5,6 +5,10 @@ import anywidget
 import pandas as pd
 import traitlets
 
+from ._assets import AssetUnavailableError, cache_dir, download_assets, get_asset
+
+__all__ = ["HandwaveWidget", "download_assets", "cache_dir"]
+
 try:
     __version__ = importlib.metadata.version("handwave")
 except importlib.metadata.PackageNotFoundError:
@@ -36,6 +40,23 @@ class HandwaveWidget(anywidget.AnyWidget):
 
     _esm = bundler_output_dir / "widget.js"
     _css = bundler_output_dir / "widget.css"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.on_msg(self._on_custom_msg)
+
+    def _on_custom_msg(self, _widget, content, _buffers):
+        """Serve MediaPipe files to the browser from the local cache."""
+        if not isinstance(content, dict) or content.get("type") != "handwave:get_asset":
+            return
+        name = content.get("name")
+        reply = {"type": "handwave:asset", "name": name}
+        try:
+            data = get_asset(name)
+        except AssetUnavailableError as e:
+            self.send({**reply, "error": str(e)})
+            return
+        self.send(reply, buffers=[data])
 
     @property
     def hands(self) -> list[pd.DataFrame]:

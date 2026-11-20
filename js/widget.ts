@@ -1,6 +1,21 @@
-import cameraUtils from "https://esm.sh/@mediapipe/camera_utils@0.3/camera_utils.js";
-import drawingUtils from "https://esm.sh/@mediapipe/drawing_utils@0.3/drawing_utils.js";
-import handslib from "https://esm.sh/@mediapipe/hands@0.4/hands.js";
+// Type-only: the MediaPipe scripts themselves are loaded at runtime (see
+// assets.ts) and expose these APIs as globals on `window`.
+import type * as CameraUtils from "@mediapipe/camera_utils";
+import type * as DrawingUtils from "@mediapipe/drawing_utils";
+import type * as Hands from "@mediapipe/hands";
+
+import { AssetModel, loadHandsAssets, loadScript } from "./assets";
+
+type MediaPipe = typeof CameraUtils & typeof DrawingUtils & typeof Hands;
+
+async function loadMediaPipe(model: AssetModel): Promise<MediaPipe> {
+  await Promise.all(
+    ["hands.js", "camera_utils.js", "drawing_utils.js"].map((name) =>
+      loadScript(model, name)
+    )
+  );
+  return window as unknown as MediaPipe;
+}
 
 import "./widget.css";
 
@@ -11,7 +26,7 @@ interface Point {
 }
 
 /* Specifies attributes defined with traitlets in ../src/handwave/__init__.py */
-interface WidgetModel {
+interface WidgetModel extends AssetModel {
   get(key: "frame_of_reference"): "image" | "world";
   get(key: "max_num_hands"): number;
   get(key: "model_complexity"): number;
@@ -27,7 +42,7 @@ interface WidgetModel {
 
   set(key: string, value: any): void;
   save_changes(): void;
-  on(event: string, callback: () => void): void;
+  on(event: string, callback: (...args: any[]) => void): void;
 }
 
 /**
@@ -70,7 +85,7 @@ interface HandTrackResults {
     label: "Left" | "Right";
     score: number;
   }>;
-  image: HTMLImageElement;
+  image: CanvasImageSource;
 }
 
 function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
@@ -171,16 +186,16 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
     // Only draw hand landmarks if debug is enabled
     for (let landmarks of results.multiHandLandmarks ?? []) {
-      drawingUtils.drawConnectors(
+      mp.drawConnectors(
         canvasCtx,
         landmarks,
-        handslib.HAND_CONNECTIONS,
+        mp.HAND_CONNECTIONS,
         {
           color: "#00FF00",
           lineWidth: 2,
         }
       );
-      drawingUtils.drawLandmarks(canvasCtx, landmarks, {
+      mp.drawLandmarks(canvasCtx, landmarks, {
         color: "#FFFFFF",
         radius: 2,
       });
@@ -189,31 +204,48 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     canvasCtx.restore();
   }
 
-  let hands = new handslib.Hands({
-    locateFile: (file: string) => {
-      // hack to load static assets...
-      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
-    },
-  });
+  let disposed = false;
+  let mp: MediaPipe;
+  let camera: CameraUtils.Camera | undefined;
 
-  hands.setOptions({
-    maxNumHands: model.get("max_num_hands"),
-    modelComplexity: model.get("model_complexity"),
-    minDetectionConfidence: model.get("min_detection_confidence"),
-    minTrackingConfidence: model.get("min_tracking_confidence"),
-  });
+  async function start() {
+    debugInfo.style.display = "block";
+    debugInfo.textContent = "Loading hand tracking model…";
+    const [mediapipe, locateFile] = await Promise.all([
+      loadMediaPipe(model),
+      loadHandsAssets(model, model.get("model_complexity")),
+    ]);
+    mp = mediapipe;
+    debugInfo.style.display = model.get("debug") ? "block" : "none";
+    debugInfo.textContent = "";
+    if (disposed) return;
 
-  hands.onResults(onResults);
+    const hands = new mp.Hands({ locateFile });
 
-  let camera = new cameraUtils.Camera(videoEl, {
-    onFrame: () => hands.send({ image: videoEl }),
-    width: model.get("width"),
-    height: model.get("height"),
-  });
+    hands.setOptions({
+      maxNumHands: model.get("max_num_hands"),
+      modelComplexity: model.get("model_complexity") as 0 | 1,
+      minDetectionConfidence: model.get("min_detection_confidence"),
+      minTrackingConfidence: model.get("min_tracking_confidence"),
+    });
 
-  camera.start().then(() => {
+    hands.onResults(onResults);
+
+    camera = new mp.Camera(videoEl, {
+      onFrame: () => hands.send({ image: videoEl }),
+      width: model.get("width"),
+      height: model.get("height"),
+    });
+
+    await camera.start();
     model.set("camera_active", true);
     model.save_changes();
+  }
+
+  start().catch((err) => {
+    console.error(err);
+    debugInfo.style.display = "block";
+    debugInfo.textContent = `Error: ${err?.message ?? err}`;
   });
 
   model.on("change:debug", () => {
@@ -230,7 +262,8 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
   });
 
   return () => {
-    camera.stop();
+    disposed = true;
+    camera?.stop();
     model.set("camera_active", false);
     model.save_changes();
   };

@@ -37,6 +37,20 @@ This will show a widget that uses your webcam to detect hand gestures.
 - You can use the `widget.hand` property to retrieve just the first detected hand and its landmarks, as a Pandas data frame (or `None` if no hand is detected).
 - Each hand also has `.attrs["handedness"]` (either "Left" or "Right") and `.attrs["handedness_score"]` properties. Be aware that Left and Right may be swapped depending on whether your camera returns mirrored video or not.
 
+## Offline use
+
+handwave uses Google's [MediaPipe Hands](https://github.com/google-ai-edge/mediapipe) model, which isn't bundled with the package. The first time the widget runs, it downloads the MediaPipe files it needs (about 16 MB) from the jsDelivr CDN and caches them locally. After that, the widget works without an internet connection.
+
+To download everything manually, run:
+
+```sh
+python -m handwave download
+```
+
+This fetches all of the files (about 24 MB), including the ones for `model_complexity=0` and for browsers without WebAssembly SIMD support. You can also call `handwave.download_assets()` from Python.
+
+Files are cached in `~/Library/Caches/handwave` on macOS, `%LOCALAPPDATA%\handwave` on Windows, and `~/.cache/handwave` elsewhere. Run `python -m handwave cache-dir` to see the location, or set the `HANDWAVE_CACHE_DIR` environment variable to use a different one.
+
 ## Configuration options
 
 The widget takes the following configuration options in its constructor:
@@ -69,8 +83,8 @@ pip install -e ".[dev]"
 jupyter lab example.ipynb
 ```
 
-The widget front-end code bundles it's JavaScript dependencies. After setting up Python,
-make sure to install these dependencies locally:
+The widget front-end code is built with esbuild. After setting up Python,
+make sure to install the JavaScript build dependencies locally:
 
 ```sh
 npm install
