@@ -43,6 +43,10 @@ Pinching your thumb and index finger together "clutches" the widget: while you h
 
 Starting a pinch takes a deliberate pose, so a relaxed hand can't start one by accident: make an "OK" sign, with your thumb and index fingertips touching, your other three fingers extended, your whole hand in view, and your hand held still for a moment (about 0.1 seconds). Once it's engaged, only the fingertips need to stay together; the other fingers can relax.
 
+### Fist clutch
+
+Making a fist clutches too, the same way: hold the fist and move, open your hand to let go. Events from a fist have `gesture="fist"` (a pinch's have `gesture="pinch"`), so you can map them to something different, such as panning. To start one, curl all four fingers in (the thumb can be anywhere), with your whole hand in view, and hold it still for a moment (about 0.15 seconds). A loosely curled, relaxed hand doesn't count. Each hand holds one clutch at a time: a pinch stays a pinch if your fingers curl up after it engages.
+
 ```python
 widget = HandwaveWidget()
 
@@ -54,21 +58,22 @@ def on_clutch(event):
 
 Each pinch produces a `"start"` event, then `"move"` events (one per video frame), then an `"end"` event. Each event is a `handwave.ClutchEvent` with:
 
+- **gesture**: `"pinch"` or `"fist"`.
 - **hand**: `"Left"` or `"Right"`. Each hand has its own clutch, so two-handed gestures work with `max_num_hands=2`.
-- **x**, **y**: The pinch point, from 0 to 1 across the frame. x is mirrored like the preview, so it increases toward your right.
+- **x**, **y**: The pinch point (or, for a fist, the middle of your knuckles), from 0 to 1 across the frame. x is mirrored like the preview, so it increases toward your right.
 - **dx**, **dy**: Movement since the previous event, in frame widths (so horizontal and vertical movement are scaled the same). Down is positive.
 - **dtheta**: Change in hand roll since the previous event, in radians. Twist your hand like a dial; clockwise is positive.
 - **dscale**: Change in the apparent size of your hand, as a ratio. Greater than 1 means your hand moved toward the camera.
 
 Use the relative values (`dx`, `dy`, `dtheta`, `dscale`) rather than absolute positions, so that releasing and re-pinching doesn't make anything jump. Movement is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/).
 
-The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment.
+The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment. A fist works the same way, shown as a larger rounded square at your knuckles, except that it doesn't freeze as it loosens: your knuckles stay put as your fingers open, and a fast-moving fist often looks loose for a frame.
 
-If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump; bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch.
+If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump (unless it was gone only for a moment, under 0.2 seconds, as when MediaPipe loses a fast-moving hand for a frame: then the movement made meanwhile counts, as if your hand was never lost); bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch. For a fist, it's your four fingers (knuckles to tips) that must stay in view; your thumb and wrist can be off the edge.
 
-`widget.clutched_hands` lists the hands that are currently pinching (including clutches on hold), and can be observed like any other trait.
+`widget.clutched_hands` lists the hands that are currently clutching with a pinch or a fist (including clutches on hold), and can be observed like any other trait.
 
-If pinches engage too easily or not easily enough, set `debug=True` to see the live pinch ratio (fingertip distance divided by palm length) and how straight your other fingers are (from 0 to 1; engaging needs 0.85 or more), and adjust `pinch_engage_threshold` and `pinch_release_threshold`. Keep the release threshold comfortably above the engage threshold.
+If pinches engage too easily or not easily enough, set `debug=True` to see the live pinch ratio (fingertip distance divided by palm length) and how straight your other fingers are (from 0 to 1; engaging needs 0.85 or more), and adjust `pinch_engage_threshold` and `pinch_release_threshold`. Keep the release threshold comfortably above the engage threshold. The debug display also shows a fist's "reach": how far your farthest fingertip is from your wrist, relative to its knuckle, in 3D (so it still works with your fist pointed at the camera). A fist engages below 1.3; an open hand is around 2. An engaged fist releases once a finger is extended (reach above 1.6 and nearly straight) for 3 frames in a row.
 
 ## Offline use
 

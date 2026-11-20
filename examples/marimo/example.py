@@ -16,10 +16,14 @@ def _():
 
 @app.cell
 def _(mo):
-    # Accumulated "specimen" pose, driven by pinch clutch events.
-    # `hands` tracks where each pinching hand is, for two-handed zoom.
+    # Accumulated "specimen" pose, driven by clutch events.
+    # `hands` tracks where each pinching hand is, for two-handed zoom;
+    # `fists` lists the hands holding a fist, which drag the specimen around;
+    # `grab` is where the fist drag says the specimen should be, before clamping
+    # it to the view (so pushing against an edge doesn't lose any distance).
     get_pose, set_pose = mo.state(
-        {"x": 0.5, "y": 0.375, "angle": 0.0, "zoom": 1.0, "hands": {}, "engaged": [], "events": 0}
+        {"x": 0.5, "y": 0.375, "angle": 0.0, "zoom": 1.0, "hands": {}, "fists": [],
+         "grab": (0.5, 0.375), "engaged": [], "events": 0}
     )
     return get_pose, set_pose
 
@@ -27,6 +31,7 @@ def _(mo):
 @app.cell
 def _(math, set_pose):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
+    FIST_GAIN = 1.5  # specimen movement per frame width of fist movement
 
 
     def pinch_span(hands):
@@ -36,13 +41,31 @@ def _(math, set_pose):
 
 
     def on_clutch(event):
-        """Pinch with both hands, then spread apart or bring together to zoom, and
-        turn the line between your hands to rotate. One hand alone does nothing."""
+        """Make a fist with either hand and move it to drag the specimen around.
+        Pinch with both hands, then spread apart or bring together to zoom, and
+        turn the line between your hands to rotate. One pinching hand alone does
+        nothing."""
 
         def update(pose):
             hands = dict(pose["hands"])
+            fists = set(pose["fists"])
             pose = dict(pose, events=pose["events"] + 1)
-            if event.type == "start":
+            if event.gesture == "fist":
+                if event.type == "start":
+                    if not fists:
+                        pose["grab"] = (pose["x"], pose["y"])
+                    fists.add(event.hand)
+                elif event.type == "end":
+                    fists.discard(event.hand)
+                else:
+                    # Follow the fist's total movement since it grabbed; clamp only
+                    # what's shown, so pushing into an edge and back doesn't drift.
+                    gx, gy = pose["grab"]
+                    gx, gy = gx + event.dx * FIST_GAIN, gy + event.dy * FIST_GAIN
+                    pose["grab"] = (gx, gy)
+                    pose["x"] = min(1.0, max(0.0, gx))
+                    pose["y"] = min(0.75, max(0.0, gy))
+            elif event.type == "start":
                 hands[event.hand] = (event.x, event.y * ASPECT)
             elif event.type == "end":
                 hands.pop(event.hand, None)
@@ -61,7 +84,10 @@ def _(math, set_pose):
                         turn = math.atan2(ay, ax) - math.atan2(by, bx)
                         pose["angle"] += (turn + math.pi) % (2 * math.pi) - math.pi
             pose["hands"] = hands
-            pose["engaged"] = sorted(hands)
+            pose["fists"] = sorted(fists)
+            pose["engaged"] = [f"{h} pinch" for h in sorted(hands)] + [
+                f"{h} fist" for h in sorted(fists)
+            ]
             return pose
 
         set_pose(update)
@@ -91,7 +117,8 @@ def _(HandwaveWidget, mo, on_clutch):
 @app.cell
 def _(get_pose, math, mo):
     _pose = get_pose()
-    _engaged = bool(_pose["engaged"])
+    # Highlight while a fist is grabbing, or both hands are pinching (zoom/rotate).
+    _engaged = bool(_pose["fists"]) or len(_pose["hands"]) == 2
     _size = 60 * _pose["zoom"]
     _fill = "#00E5FF" if _engaged else "#9AA4AE"
     mo.vstack([
@@ -107,8 +134,9 @@ def _(get_pose, math, mo):
         </svg>
         """),
         mo.md(
-            "Pinch with both hands, then spread them apart or bring them together "
-            "to zoom, and turn the line between them to rotate."
+            "Make a fist and move it to drag the square around. Pinch with both "
+            "hands, then spread them apart or bring them together to zoom, and "
+            "turn the line between them to rotate."
         ),
         mo.md(
             f"**Clutched:** {', '.join(_pose['engaged']) or 'none'} · "

@@ -21,25 +21,27 @@ bundler_output_dir = pathlib.Path(__file__).parent / "static"
 
 @dataclasses.dataclass(frozen=True)
 class ClutchEvent:
-    """A pinch clutch event, delivered to callbacks registered with
+    """A clutch event (pinch or fist), delivered to callbacks registered with
     `HandwaveWidget.on_clutch()`.
 
     A gesture is a "start" event, any number of "move" events, then an "end"
-    event. Use the relative fields (`dx`, `dy`, `dtheta`, `dscale`) to drive
-    whatever you're manipulating; releasing and re-pinching then lets you
-    reposition your hand without moving the data (like lifting a mouse).
+    event, all with the same `gesture`. Use the relative fields (`dx`, `dy`,
+    `dtheta`, `dscale`) to drive whatever you're manipulating; releasing and
+    re-engaging then lets you reposition your hand without moving the data
+    (like lifting a mouse).
     """
 
     type: typing.Literal["start", "move", "end"]
     """Phase of the gesture."""
-    gesture: typing.Literal["pinch"]
-    """Which clutch gesture produced the event."""
+    gesture: typing.Literal["pinch", "fist"]
+    """Which clutch gesture produced the event: an "OK sign" pinch or a fist."""
     hand: typing.Literal["Left", "Right"]
     """Which hand (subject to the usual handedness caveats)."""
     x: float
-    """Pinch point, 0 (user's left) to 1 (user's right), mirrored like the preview."""
+    """Gesture point (the pinch, or a fist's knuckles), 0 (user's left) to 1
+    (user's right), mirrored like the preview."""
     y: float
-    """Pinch point, 0 (top) to 1 (bottom)."""
+    """Gesture point, 0 (top) to 1 (bottom)."""
     dx: float
     """Horizontal movement since the last event, in frame widths."""
     dy: float
@@ -90,7 +92,7 @@ class HandwaveWidget(anywidget.AnyWidget):
         self.on_msg(self._on_custom_msg)
 
     def on_clutch(self, callback: ClutchCallback, remove: bool = False):
-        """Register a callback for pinch clutch events.
+        """Register a callback for clutch events (pinch and fist).
 
         The callback receives a `ClutchEvent`. Can be used as a decorator:
 

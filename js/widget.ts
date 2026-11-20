@@ -271,7 +271,8 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
           .map(
             (v) =>
               `${v.hand} pinch: <tt>${v.ratio.toFixed(2)}</tt> ` +
-              `fingers: <tt>${v.straightness.toFixed(2)}</tt> ${v.state}`
+              `fingers: <tt>${v.straightness.toFixed(2)}</tt> ` +
+              `reach: <tt>${v.reach.toFixed(2)}</tt> ${v.gesture} ${v.state}`
           )
           .join("<br>");
     }
@@ -359,11 +360,12 @@ const CLUTCH_COLORS = {
 
 /**
  * Draws clutch feedback in raw landmark coordinates (the caller has already
- * mirrored the context). Idle: a ring that fills as the fingers close.
- * Engaged: a solid dot with a tether back to where the pinch started.
- * Frozen (pinch loosening, or first frame back in view): an amber ring.
- * Suspended (hand gone, or a fingertip at the edge): a dashed orange ring
- * where the hand was, kept inside the frame.
+ * mirrored the context), at the pinch point (a circle) or a fist's knuckles
+ * (a larger rounded square). Idle: a ring that fills as the fingers close.
+ * Engaged: a solid marker with a tether back to where the gesture started.
+ * Frozen (loosening, or first frame back in view): an amber outline.
+ * Suspended (hand gone, or the gesture's fingers at the edge): a dashed
+ * orange outline where the hand was, kept inside the frame.
  */
 function drawClutch(
   ctx: CanvasRenderingContext2D,
@@ -371,7 +373,8 @@ function drawClutch(
   width: number,
   height: number
 ) {
-  const radius = 12;
+  const fist = visual.gesture === "fist";
+  const radius = fist ? 16 : 12;
   let x = visual.point.x * width;
   let y = visual.point.y * height;
   if (visual.state === "suspended") {
@@ -385,10 +388,18 @@ function drawClutch(
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
 
+  const marker = () => {
+    ctx.beginPath();
+    if (fist) {
+      ctx.roundRect(x - radius, y - radius, 2 * radius, 2 * radius, 5);
+    } else {
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    }
+  };
+
   if (visual.state === "suspended") {
     ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    marker();
     ctx.stroke();
   } else if (visual.state === "idle") {
     if (visual.progress > 0) {
@@ -416,8 +427,7 @@ function drawClutch(
       ctx.arc(ax, ay, 3, 0, 2 * Math.PI);
       ctx.fill();
     }
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    marker();
     if (visual.state === "engaged") {
       ctx.globalAlpha = 0.6;
       ctx.fill();

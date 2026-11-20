@@ -15,12 +15,15 @@ const WRIST = 0;
 const THUMB_IP = 3;
 const THUMB_TIP = 4;
 const INDEX_DIP = 7;
+const INDEX_MCP = 5;
 const INDEX_TIP = 8;
 const MIDDLE_MCP = 9;
 const RING_MCP = 13;
 const PINKY_MCP = 17;
 /** Palm landmarks, averaged to track how fast the hand is moving. */
-const PALM = [WRIST, 5, MIDDLE_MCP, RING_MCP, PINKY_MCP];
+const PALM = [WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP];
+/** Knuckles (MCP joints) of the index, middle, ring and pinky fingers. */
+const FINGER_MCPS = [INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP];
 /** How far back (ms) to look when measuring palm speed. */
 const SPEED_WINDOW_MS = 100;
 
@@ -33,6 +36,12 @@ const SPEED_WINDOW_MS = 100;
  * clutch on hold.
  */
 const PINCH_LANDMARKS = [THUMB_IP, THUMB_TIP, INDEX_DIP, INDEX_TIP];
+
+/**
+ * Landmarks that must be in view for the clutch to judge a fist: the four
+ * fingers, knuckles to tips. The thumb and wrist can be off the edge.
+ */
+const FIST_LANDMARKS = FINGER_MCPS.flatMap((mcp) => [mcp, mcp + 1, mcp + 2, mcp + 3]);
 
 /**
  * How far inside the frame edge (as a fraction of width or height) those
@@ -95,6 +104,8 @@ function lerp(a: number, b: number, alpha: number): number {
   return a + alpha * (b - a);
 }
 
+export type Gesture = "pinch" | "fist";
+
 export interface ClutchOptions {
   /** Pinch ratio below which a pinch engages. */
   engageThreshold: number;
@@ -104,32 +115,90 @@ export interface ClutchOptions {
    * How long (ms) the engage pose must be held before the clutch engages.
    *
    * Engaging takes a deliberate pose, so a relaxed hand can't engage by
-   * accident: thumb and index fingertips touching, the other three fingers
-   * extended (an "OK" sign), the whole hand in view, and the hand nearly
-   * still. Staying engaged only needs the fingertips to stay together.
+   * accident. For a pinch: thumb and index fingertips touching, the other
+   * three fingers extended (an "OK" sign). For a fist: all four fingers
+   * curled in. Either way, the whole hand in view and nearly still. Staying
+   * engaged only needs the pinch (or the fist) to stay closed.
    */
   engageMs: number;
   /**
    * Minimum average straightness of the middle, ring and pinky fingers to
-   * engage, from 0 (folded) to 1 (straight). In recorded data, deliberate
-   * "OK" signs measured 0.91-1.0, relaxed or dropping hands 0.2-0.8.
+   * engage a pinch, from 0 (folded) to 1 (straight). In recorded data,
+   * deliberate "OK" signs measured 0.91-1.0, relaxed or dropping hands
+   * 0.2-0.8.
    */
   engageStraightness: number;
+  /**
+   * Minimum reach (3D; see `fistEngageReach`) of each of the middle, ring
+   * and pinky fingers to engage a pinch. With a fist's fingers curled toward
+   * the camera they look straight in the image (0.85-0.9), but their tips
+   * are close to the wrist: in recorded data such fists measured 0.46-0.65
+   * and twice engaged as pinches, while "OK" signs measured 1.7 or more.
+   */
+  engageReach: number;
   /**
    * Fastest the palm may move while engaging, in frame widths per second.
    * In recorded data, deliberate pinches engaged below 0.1; accidental ones
    * on a dropping hand at 0.7-4.
    */
   engageMaxSpeed: number;
-  /** Consecutive frames above `releaseThreshold` required to release. */
+  /**
+   * A clutch back from a hold no longer than this (ms) carries on as if the
+   * hand was never lost, movement included; after a longer hold it resumes
+   * from where the hand is, without a jump. During fast movement MediaPipe
+   * often loses the hand for a frame or two, or it swings briefly past the
+   * edge; in recorded data, dropping the movement from those gaps made a
+   * fist shaken back and forth drift by up to 0.4 frame widths.
+   */
+  bridgeMs: number;
+  /** Consecutive frames above the release threshold required to release. */
   releaseFrames: number;
   /**
-   * Consecutive frames above `releaseThreshold` required to release a clutch
-   * that's on hold, once the hand is back in view. Higher than
+   * Consecutive frames above the release threshold required to release a
+   * clutch that's on hold, once the hand is back in view. Higher than
    * `releaseFrames` because MediaPipe takes a moment to settle on a
    * re-entering hand, and a false release is costlier than a late one.
    */
   releaseFramesAfterHold: number;
+  /**
+   * Fist reach below which a fist engages. A finger's reach is how far its
+   * tip is from the wrist, divided by how far its knuckle is from the wrist,
+   * in 3D (MediaPipe's depth estimate included); the fist's reach is the
+   * largest of the four fingers'. Measuring in the image alone failed for a
+   * fist pointed at the camera, where the knuckles hide the wrist: reach
+   * shot up to 4-18. In recorded data, held fists measured 0.8-1.2 (a fist
+   * pointed at the camera up to 1.7), and open hands 1.9-2.4.
+   */
+  fistEngageReach: number;
+  /**
+   * Like `engageMs`, for a fist. Longer, because a hand curls up briefly as
+   * it drops; in recorded data one did for 100ms.
+   */
+  fistEngageMs: number;
+  /**
+   * An engaged fist releases when some finger is extended: its reach above
+   * `fistReleaseReach` and its straightness (in the image) above
+   * `fistReleaseStraightness`. Reach alone wasn't enough: from some angles
+   * MediaPipe sees a fist's index finger half uncurled (reach up to 1.9,
+   * straightness 0.6-0.85). In recorded data, fists had an extended finger
+   * in 0-1% of frames (never two in a row), open hands and finger guns in
+   * 98-100%.
+   */
+  fistReleaseReach: number;
+  fistReleaseStraightness: number;
+  /**
+   * Like `releaseFrames`, for a fist. Higher, because from some angles
+   * MediaPipe sees a fist's index finger flick out straight for a couple of
+   * frames.
+   */
+  fistReleaseFrames: number;
+  /**
+   * Maximum average straightness of all four fingers to engage a fist.
+   * Recorded fists measured 0.2-0.5 when held still. This mostly rejects
+   * MediaPipe's ghost hands, whose foreshortened fingers have a fist-like
+   * reach but read as straight.
+   */
+  fistEngageStraightness: number;
 }
 
 export const defaultClutchOptions: ClutchOptions = {
@@ -137,18 +206,29 @@ export const defaultClutchOptions: ClutchOptions = {
   releaseThreshold: 0.4,
   engageMs: 100,
   engageStraightness: 0.85,
+  engageReach: 1.4,
   engageMaxSpeed: 0.5,
+  bridgeMs: 200,
   releaseFrames: 2,
   releaseFramesAfterHold: 5,
+  fistEngageReach: 1.3,
+  fistEngageMs: 150,
+  fistReleaseReach: 1.6,
+  fistReleaseStraightness: 0.9,
+  fistReleaseFrames: 3,
+  fistEngageStraightness: 0.6,
 };
 
 export interface ClutchEvent {
   type: "start" | "move" | "end";
-  gesture: "pinch";
+  /** Which pose holds the clutch: "pinch" or "fist". */
+  gesture: Gesture;
   hand: string;
   /**
-   * Pinch point, normalized to [0, 1] across the frame. Mirrored like the
-   * preview, so x increases toward the user's right; y increases downward.
+   * Gesture point, normalized to [0, 1] across the frame: between the
+   * fingertips for a pinch, the middle of the knuckles for a fist. Mirrored
+   * like the preview, so x increases toward the user's right; y increases
+   * downward.
    */
   x: number;
   y: number;
@@ -169,18 +249,27 @@ export interface ClutchEvent {
 export interface ClutchVisual {
   hand: string;
   /**
-   * "frozen": engaged, but movement is ignored (pinch loosening, or the
-   * first frame back in view).
-   * "suspended": engaged, but on hold because the hand is gone or part of
-   * its thumb or index fingertip is at the edge; waiting for it to come back.
+   * The engaged gesture or, when idle, the one the hand looks closest to
+   * (curled fingers: fist; otherwise pinch).
+   */
+  gesture: Gesture;
+  /**
+   * "frozen": engaged, but movement is ignored (pinch or fist loosening, or
+   * the first frame back in view).
+   * "suspended": engaged, but on hold because the hand is gone or the
+   * landmarks the gesture depends on are at the edge; waiting for it to come
+   * back.
    */
   state: "idle" | "engaged" | "frozen" | "suspended";
+  /** Pinch ratio. */
   ratio: number;
-  /** Idle: 0..1, how close the pinch is to engaging. */
+  /** Fist reach. */
+  reach: number;
+  /** Idle: 0..1, how close the gesture is to engaging. */
   progress: number;
   /** Average straightness of the middle, ring and pinky fingers (0..1). */
   straightness: number;
-  /** Pinch point and start point in raw (unmirrored) landmark coordinates. */
+  /** Gesture point and start point in raw (unmirrored) landmark coordinates. */
   point: { x: number; y: number };
   anchor?: { x: number; y: number };
 }
@@ -196,30 +285,59 @@ interface Features {
   logScale: number;
 }
 
+/** Everything the clutch needs to know about one frame of one hand. */
+interface Measures {
+  /** Fingertip distance / palm length. */
+  ratio: number;
+  /** Largest finger reach (see `fistEngageReach`). */
+  reach: number;
+  /** Smallest reach of the middle, ring and pinky fingers. */
+  otherFingersReach: number;
+  /**
+   * How extended the most extended finger is: above 1 when both its reach
+   * and its straightness pass the fist's release thresholds.
+   */
+  extension: number;
+  /** Average straightness of the middle, ring and pinky fingers. */
+  straightness: number;
+  /** Average straightness of all four fingers. */
+  fingersStraightness: number;
+  wholeHandVisible: boolean;
+}
+
 /**
- * Pinch clutch for one hand: thumb and index fingertips together = engaged.
+ * Clutch for one hand: a pinch (thumb and index fingertips together) or a
+ * fist engages it, and the same pose must be held to stay engaged.
  *
- * The pinch ratio is fingertip distance divided by palm length (wrist to
- * middle knuckle), so thresholds don't depend on distance from the camera.
- * Engage and release use different thresholds (hysteresis) so the state
- * doesn't flicker. Between "engaged" and "released" there is a dead band where
- * the pinch is loosening: movement there is ignored, which keeps the fingers
- * opening from dragging the data on release.
+ * A pinch's openness is the pinch ratio (fingertip distance divided by palm
+ * length, wrist to middle knuckle). A fist engages on its reach and releases
+ * when a finger is extended (see `fistEngageReach` and `fistReleaseReach`).
+ * All are ratios of hand measurements, so thresholds don't depend on
+ * distance from the camera. Engage and release use different thresholds
+ * (hysteresis) so the state doesn't flicker. For a pinch, between "engaged" and "released" there is a
+ * dead band where the pinch is loosening: movement there is ignored, which
+ * keeps the fingers opening from dragging the data on release.
  *
- * If the hand leaves the frame (or tracking drops) mid-pinch, the clutch is
- * put on hold rather than ended, for as long as it takes: it resumes without
- * a jump if the hand comes back pinched, and releases if it comes back open
- * (and stays open for `releaseFramesAfterHold` frames). The same happens
- * while either fingertip (or the joint below it) is outside the frame or within
+ * If the hand leaves the frame (or tracking drops) mid-gesture, the clutch is
+ * put on hold rather than ended, for as long as it takes: it releases if the
+ * hand comes back open (and stays open for `releaseFramesAfterHold` frames).
+ * If it comes back still closed, it resumes without a jump, or, after a
+ * brief dropout (`bridgeMs`), carries on as if the hand was never lost.
+ * The same hold happens while landmarks the gesture depends on are outside the frame or within
  * `EDGE_MARGIN` of it, where MediaPipe guesses at landmarks: neither their
- * movement nor whether they look pinched can be trusted.
+ * movement nor whether they look closed can be trusted. For a pinch that's
+ * the thumb and index fingertips and the joint below each; for a fist, the
+ * four fingers (knuckles to tips).
  */
-export class PinchClutch {
+export class HandClutch {
   readonly hand: string;
   opts: ClutchOptions;
   state: "idle" | "engaged" | "suspended" = "idle";
+  /** The engaged gesture; undefined while idle. */
+  gesture: Gesture | undefined;
 
-  /** When the engage pose was first seen, if it's been held since. */
+  /** The gesture whose engage pose is being held, and since when. */
+  private engageGesture: Gesture | undefined;
   private engageSince: number | undefined;
   /** Recent palm positions (frame widths) for measuring speed. */
   private palmTrail: Array<{ t: number; x: number; y: number }> = [];
@@ -229,13 +347,18 @@ export class PinchClutch {
   private fy = new OneEuroFilter(1.5, 8);
   private fAngle = new OneEuroFilter(1.5, 0.5);
   private fScale = new OneEuroFilter(1.5, 0.5);
+  /** Which gesture's point the position filters are tracking. */
+  private filterGesture: Gesture | undefined;
   private rawAngle: number | undefined;
   private unwrappedAngle = 0;
   private last: Features | undefined;
   private anchor: { x: number; y: number } | undefined;
   private lastPoint = { x: 0.5, y: 0.5 };
   private lastRatio = 0;
+  private lastReach = 0;
   private outOfFrame = false;
+  /** When the clutch last went on hold. */
+  private suspendedAt = 0;
   /** Frame height / width, from the most recent update(). */
   private aspect = 1;
 
@@ -258,21 +381,20 @@ export class PinchClutch {
     const events: ClutchEvent[] = [];
     this.aspect = aspect;
 
-    const ratio =
-      dist3(lm[THUMB_TIP], lm[INDEX_TIP], aspect, PINCH_DEPTH_WEIGHT) /
-      Math.max(dist3(lm[WRIST], lm[MIDDLE_MCP], aspect), 1e-6);
-    const point = {
-      x: (lm[THUMB_TIP].x + lm[INDEX_TIP].x) / 2,
-      y: (lm[THUMB_TIP].y + lm[INDEX_TIP].y) / 2,
-    };
-    const visible = PINCH_LANDMARKS.every((i) => insideMargin(lm[i]));
-    const wholeHandVisible = lm.every((p) => insideMargin(p));
-    const straightness =
-      (fingerStraightness(lm, MIDDLE_MCP, aspect) +
-        fingerStraightness(lm, RING_MCP, aspect) +
-        fingerStraightness(lm, PINKY_MCP, aspect)) /
-      3;
+    const m = measure(lm, aspect, opts);
     const speed = this.palmSpeed(lm, tMs, aspect);
+    // While idle, follow whichever gesture the hand looks closest to, so the
+    // filters are already settled on its point when it engages.
+    const gesture: Gesture =
+      this.gesture ??
+      (m.straightness <
+      (opts.fistEngageStraightness + opts.engageStraightness) / 2
+        ? "fist"
+        : "pinch");
+    const point = gesturePoint(lm, gesture);
+    const visible = this.gesture
+      ? gestureVisible(lm, this.gesture)
+      : m.wholeHandVisible;
     const reenteredFrame = visible && this.outOfFrame;
     this.outOfFrame = !visible;
     if (this.state === "suspended" || reenteredFrame) {
@@ -280,88 +402,140 @@ export class PinchClutch {
       // extrapolated off the edge); don't smooth across that.
       this.resetFilters();
     }
-    const f = this.features(lm, point, tMs / 1000, aspect);
-    this.lastPoint = point;
-    this.lastRatio = ratio;
+    this.lastRatio = m.ratio;
+    this.lastReach = m.reach;
 
     let frozen = false;
-    if (this.state === "suspended") {
-      if (!visible) {
-        // Still (partly) off the edge: the pinch can't be judged yet.
-      } else if (ratio < opts.releaseThreshold) {
-        // Back, still pinched: resume from here, without a jump.
+    if (this.state === "idle") {
+      const pinchReady =
+        m.ratio < opts.engageThreshold &&
+        m.straightness >= opts.engageStraightness &&
+        m.otherFingersReach >= opts.engageReach;
+      const fistReady =
+        m.reach < opts.fistEngageReach &&
+        m.fingersStraightness < opts.fistEngageStraightness;
+      const ready: Gesture | undefined =
+        !m.wholeHandVisible || speed >= opts.engageMaxSpeed
+          ? undefined
+          : pinchReady
+            ? "pinch"
+            : fistReady
+              ? "fist"
+              : undefined;
+      if (ready !== this.engageGesture) {
+        this.engageGesture = ready;
+        this.engageSince = ready ? tMs : undefined;
+      }
+      const f = this.features(lm, gesture, point, tMs / 1000, aspect);
+      if (
+        ready !== undefined &&
+        this.engageSince !== undefined &&
+        tMs - this.engageSince >=
+          (ready === "fist" ? opts.fistEngageMs : opts.engageMs)
+      ) {
+        this.engageGesture = undefined;
+        this.engageSince = undefined;
         this.state = "engaged";
+        this.gesture = ready;
         this.aboveCount = 0;
-        this.last = f;
-        frozen = true;
+        const p = gesturePoint(lm, ready);
+        const fe =
+          ready === gesture
+            ? f
+            : this.features(lm, ready, p, tMs / 1000, aspect);
+        this.last = fe;
+        this.anchor = p;
+        this.lastPoint = p;
+        events.push(this.event("start", fe, tMs));
       } else {
-        // Back, but open: that's a release, if it stays open.
-        this.aboveCount += 1;
-        if (this.aboveCount >= opts.releaseFramesAfterHold) {
+        this.lastPoint = point;
+      }
+    } else {
+      const g = this.gesture!;
+      const f = this.features(lm, g, point, tMs / 1000, aspect);
+      this.lastPoint = point;
+      const open = g === "fist" ? m.extension : m.ratio;
+      const releaseAt = g === "fist" ? 1 : opts.releaseThreshold;
+      if (this.state === "suspended") {
+        if (!visible) {
+          // Still (partly) off the edge: the pose can't be judged yet.
+        } else if (open < releaseAt) {
+          this.state = "engaged";
+          this.aboveCount = 0;
+          if (tMs - this.suspendedAt <= opts.bridgeMs) {
+            // Back after a brief dropout: carry on as if the hand was never
+            // lost, so the movement made meanwhile isn't dropped.
+            events.push(this.event("move", f, tMs));
+          } else {
+            // Back after a while: resume from here, without a jump.
+            frozen = true;
+          }
+          this.last = f;
+        } else {
+          // Back, but open: that's a release, if it stays open.
+          this.aboveCount += 1;
+          if (this.aboveCount >= opts.releaseFramesAfterHold) {
+            events.push(this.event("end", f, tMs));
+            this.disengage();
+          }
+        }
+      } else if (!visible) {
+        // Landmarks the gesture depends on went off or near the edge.
+        // MediaPipe still tracks the hand but guesses those landmarks, so
+        // the point and openness can't be trusted: put the clutch on hold,
+        // as if the hand was lost.
+        this.suspend(tMs);
+      } else {
+        this.aboveCount = open > releaseAt ? this.aboveCount + 1 : 0;
+        if (
+          this.aboveCount >=
+          (g === "fist" ? opts.fistReleaseFrames : opts.releaseFrames)
+        ) {
           events.push(this.event("end", f, tMs));
           this.disengage();
+        } else if (
+          g === "pinch" &&
+          open > (opts.engageThreshold + releaseAt) / 2
+        ) {
+          // Loosening pinch: rebase so nothing jumps if it closes up again.
+          // Fists don't need this: their point (the knuckles) stays put as
+          // the fingers open, while motion blur on a fast-moving fist often
+          // makes it look loose for a frame, and freezing then drops the
+          // movement.
+          frozen = true;
+          this.last = f;
+        } else {
+          events.push(this.event("move", f, tMs));
+          this.last = f;
         }
-      }
-    } else if (this.state === "idle") {
-      const ready =
-        ratio < opts.engageThreshold &&
-        wholeHandVisible &&
-        straightness >= opts.engageStraightness &&
-        speed < opts.engageMaxSpeed;
-      if (!ready) {
-        this.engageSince = undefined;
-      } else {
-        this.engageSince ??= tMs;
-      }
-      if (
-        this.engageSince !== undefined &&
-        tMs - this.engageSince >= opts.engageMs
-      ) {
-        this.engageSince = undefined;
-        this.state = "engaged";
-        this.aboveCount = 0;
-        this.last = f;
-        this.anchor = point;
-        events.push(this.event("start", f, tMs));
-      }
-    } else if (!visible) {
-      // A fingertip (or the joint below it) went off or near the edge.
-      // MediaPipe still tracks the hand but guesses those landmarks, so the
-      // pinch point and ratio can't be trusted: put the clutch on hold, as
-      // if the hand was lost.
-      this.suspend();
-    } else {
-      this.aboveCount =
-        ratio > opts.releaseThreshold ? this.aboveCount + 1 : 0;
-      if (this.aboveCount >= opts.releaseFrames) {
-        events.push(this.event("end", f, tMs));
-        this.disengage();
-      } else if (ratio > (opts.engageThreshold + opts.releaseThreshold) / 2) {
-        // Loosening pinch: rebase so nothing jumps if it firms up again.
-        frozen = true;
-        this.last = f;
-      } else {
-        events.push(this.event("move", f, tMs));
-        this.last = f;
       }
     }
 
     if (this.state === "suspended") {
       return { events, visual: this.suspendedVisual() };
     }
-    const openRatio = 0.8;
-    const progress = clamp01(
-      (openRatio - ratio) / (openRatio - opts.engageThreshold)
-    );
+    const shown = this.gesture ?? gesture;
+    const progress =
+      shown === "fist"
+        ? clamp01(
+            (FIST_OPEN_REACH - m.reach) /
+              (FIST_OPEN_REACH - opts.fistEngageReach)
+          )
+        : clamp01(
+            (PINCH_OPEN_RATIO - m.ratio) /
+              (PINCH_OPEN_RATIO - opts.engageThreshold)
+          );
     return {
       events,
       visual: {
         hand: this.hand,
+        gesture: shown,
         state: this.state === "idle" ? "idle" : frozen ? "frozen" : "engaged",
-        ratio,
+        ratio: m.ratio,
+        reach: m.reach,
         progress,
-        straightness,
-        point,
+        straightness: m.straightness,
+        point: this.lastPoint,
         anchor: this.state === "engaged" ? this.anchor : undefined,
       },
     };
@@ -371,17 +545,18 @@ export class PinchClutch {
    * Call when the hand is no longer detected. An engaged clutch goes on hold
    * until the hand comes back; there's no timeout.
    */
-  lost() {
+  lost(tMs: number) {
     if (this.state === "engaged") {
-      this.suspend();
+      this.suspend(tMs);
     } else if (this.state === "idle") {
+      this.engageGesture = undefined;
       this.engageSince = undefined;
       this.resetFilters();
     }
     this.palmTrail = [];
   }
 
-  /** Pinch point where the hand was last seen, in raw landmark coordinates. */
+  /** Gesture point where the hand was last seen, in raw landmark coordinates. */
   get lastSeen(): { x: number; y: number } {
     return this.lastPoint;
   }
@@ -390,8 +565,10 @@ export class PinchClutch {
   suspendedVisual(): ClutchVisual {
     return {
       hand: this.hand,
+      gesture: this.gesture ?? "pinch",
       state: "suspended",
       ratio: this.lastRatio,
+      reach: this.lastReach,
       progress: 0,
       straightness: 0,
       point: this.lastPoint,
@@ -399,8 +576,9 @@ export class PinchClutch {
     };
   }
 
-  private suspend() {
+  private suspend(tMs: number) {
     this.state = "suspended";
+    this.suspendedAt = tMs;
     this.aboveCount = 0;
   }
 
@@ -423,6 +601,8 @@ export class PinchClutch {
 
   private disengage() {
     this.state = "idle";
+    this.gesture = undefined;
+    this.engageGesture = undefined;
     this.engageSince = undefined;
     this.aboveCount = 0;
     this.last = undefined;
@@ -439,10 +619,17 @@ export class PinchClutch {
 
   private features(
     lm: Point[],
+    gesture: Gesture,
     point: { x: number; y: number },
     t: number,
     aspect: number
   ): Features {
+    if (gesture !== this.filterGesture) {
+      // Switching to another gesture's point: don't smooth across the jump.
+      this.fu.reset();
+      this.fy.reset();
+      this.filterGesture = gesture;
+    }
     // Roll: direction from wrist to middle knuckle, in mirrored, isotropic
     // screen space (y down), so positive change = clockwise on screen.
     const ax = -(lm[MIDDLE_MCP].x - lm[WRIST].x);
@@ -472,7 +659,7 @@ export class PinchClutch {
     const last = type === "move" && this.last ? this.last : f;
     return {
       type,
-      gesture: "pinch",
+      gesture: this.gesture!,
       hand: this.hand,
       x: f.u,
       y: f.y,
@@ -485,6 +672,126 @@ export class PinchClutch {
   }
 }
 
+/** Pinch ratio at which the idle progress ring is empty. */
+const PINCH_OPEN_RATIO = 0.8;
+/** Fist reach at which the idle progress ring is empty. */
+const FIST_OPEN_REACH = 2.0;
+
+function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
+  const fingers = FINGER_MCPS.map((mcp) =>
+    fingerStraightness(lm, mcp, aspect)
+  );
+  const reaches = FINGER_MCPS.map(
+    (mcp) =>
+      dist3(lm[mcp + 3], lm[WRIST], aspect) /
+      Math.max(dist3(lm[mcp], lm[WRIST], aspect), 1e-6)
+  );
+  return {
+    ratio:
+      dist3(lm[THUMB_TIP], lm[INDEX_TIP], aspect, PINCH_DEPTH_WEIGHT) /
+      Math.max(dist3(lm[WRIST], lm[MIDDLE_MCP], aspect), 1e-6),
+    reach: Math.max(...reaches),
+    otherFingersReach: Math.min(reaches[1], reaches[2], reaches[3]),
+    extension: Math.max(
+      ...reaches.map((r, i) =>
+        Math.min(
+          r / opts.fistReleaseReach,
+          fingers[i] / opts.fistReleaseStraightness
+        )
+      )
+    ),
+    straightness: (fingers[1] + fingers[2] + fingers[3]) / 3,
+    fingersStraightness: (fingers[0] + fingers[1] + fingers[2] + fingers[3]) / 4,
+    wholeHandVisible: lm.every((p) => insideMargin(p)),
+  };
+}
+
+/**
+ * Where a gesture is, in raw landmark coordinates: between the thumb and
+ * index fingertips for a pinch, the middle of the four knuckles for a fist.
+ */
+function gesturePoint(lm: Point[], gesture: Gesture): { x: number; y: number } {
+  const ids = gesture === "fist" ? FINGER_MCPS : [THUMB_TIP, INDEX_TIP];
+  let x = 0;
+  let y = 0;
+  for (const i of ids) {
+    x += lm[i].x / ids.length;
+    y += lm[i].y / ids.length;
+  }
+  return { x, y };
+}
+
+/** Whether the landmarks a gesture depends on are safely inside the frame. */
+function gestureVisible(lm: Point[], gesture: Gesture): boolean {
+  const ids = gesture === "fist" ? FIST_LANDMARKS : PINCH_LANDMARKS;
+  return ids.every((i) => insideMargin(lm[i]));
+}
+
+/**
+ * How much of a hand's bounding box may overlap a bigger hand's before it's
+ * dropped as a ghost. With `max_num_hands` 2, MediaPipe sometimes reports a
+ * second, smaller "hand" on top of a real one: it did in 30% of frames of a
+ * recorded side-on fist, sometimes with the same label and listed first.
+ * In recorded data ghosts overlapped by 0.44 or more, while two real hands
+ * held close together (fingertips almost touching) didn't overlap at all.
+ */
+const GHOST_OVERLAP = 0.3;
+
+/**
+ * Drops hands that mostly overlap a bigger hand (see `GHOST_OVERLAP`).
+ * Exported for testing.
+ */
+export function dropGhostHands<H extends { landmarks: Point[] }>(
+  hands: H[]
+): H[] {
+  if (hands.length < 2) return hands;
+  const boxes = hands.map((h) => boundingBox(h.landmarks));
+  const order = hands.map((_, i) => i).sort(
+    (a, b) => boxArea(boxes[b]) - boxArea(boxes[a])
+  );
+  const kept: number[] = [];
+  for (const i of order) {
+    const b = boxes[i];
+    const ghost = kept.some(
+      (k) => boxArea(intersect(b, boxes[k])) > GHOST_OVERLAP * boxArea(b)
+    );
+    if (!ghost) kept.push(i);
+  }
+  // Keep MediaPipe's order.
+  return hands.filter((_, i) => kept.includes(i));
+}
+
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function boundingBox(lm: Point[]): Box {
+  const xs = lm.map((p) => p.x);
+  const ys = lm.map((p) => p.y);
+  return {
+    x0: Math.min(...xs),
+    y0: Math.min(...ys),
+    x1: Math.max(...xs),
+    y1: Math.max(...ys),
+  };
+}
+
+function boxArea(b: Box): number {
+  return Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0);
+}
+
+function intersect(a: Box, b: Box): Box {
+  return {
+    x0: Math.max(a.x0, b.x0),
+    y0: Math.max(a.y0, b.y0),
+    x1: Math.min(a.x1, b.x1),
+    y1: Math.min(a.y1, b.y1),
+  };
+}
+
 /**
  * How close (in frame widths) a returning hand must be to where a held
  * clutch was last seen to take it over, when two hands may be in view.
@@ -492,7 +799,7 @@ export class PinchClutch {
 const ADOPT_RADIUS = 0.3;
 
 /**
- * Tracks a pinch clutch per hand, keyed by MediaPipe's handedness label.
+ * Tracks a clutch (pinch or fist) per hand, keyed by MediaPipe's handedness label.
  *
  * MediaPipe sometimes swaps the label when a hand comes back into view. A
  * held clutch would then never see its hand again (and, with no timeout,
@@ -509,7 +816,7 @@ export class GestureTracker {
   opts: ClutchOptions;
   /** Most hands MediaPipe will report (the widget's `max_num_hands`). */
   maxHands: number;
-  private clutches = new Map<string, PinchClutch>();
+  private clutches = new Map<string, HandClutch>();
   /** Incoming label -> label of the held clutch that hand took over. */
   private aliases = new Map<string, string>();
   /** Labels MediaPipe reported in the previous frame. */
@@ -528,6 +835,7 @@ export class GestureTracker {
     const events: ClutchEvent[] = [];
     const visuals: ClutchVisual[] = [];
     const seen = new Set<string>();
+    hands = dropGhostHands(hands);
     const labels = new Set(hands.map((h) => h.label));
 
     // An alias ends when its clutch is released, or when the clutch's own
@@ -553,7 +861,7 @@ export class GestureTracker {
       if (seen.has(key)) continue;
       seen.add(key);
       if (!clutch) {
-        clutch = new PinchClutch(key, this.opts);
+        clutch = new HandClutch(key, this.opts);
         this.clutches.set(key, clutch);
       }
       clutch.opts = this.opts;
@@ -564,7 +872,7 @@ export class GestureTracker {
 
     for (const [key, clutch] of this.clutches) {
       if (!seen.has(key)) {
-        clutch.lost();
+        clutch.lost(tMs);
         if (clutch.state === "suspended") {
           visuals.push(clutch.suspendedVisual());
         }
@@ -586,11 +894,7 @@ export class GestureTracker {
     labels: Set<string>,
     seen: Set<string>,
     aspect: number
-  ): PinchClutch | undefined {
-    const point = {
-      x: (lm[THUMB_TIP].x + lm[INDEX_TIP].x) / 2,
-      y: (lm[THUMB_TIP].y + lm[INDEX_TIP].y) / 2,
-    };
+  ): HandClutch | undefined {
     for (const clutch of this.clutches.values()) {
       if (
         clutch.state === "idle" ||
@@ -601,6 +905,7 @@ export class GestureTracker {
         continue;
       }
       if (this.maxHands <= 1) return clutch;
+      const point = gesturePoint(lm, clutch.gesture ?? "pinch");
       const last = clutch.lastSeen;
       const d = Math.hypot(point.x - last.x, (point.y - last.y) * aspect);
       if (d < ADOPT_RADIUS) return clutch;

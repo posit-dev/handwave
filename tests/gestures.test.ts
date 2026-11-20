@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
+  dropGhostHands,
   GestureTracker,
   type ClutchEvent,
   type Point,
@@ -58,6 +59,12 @@ function hand(
 
 /** Frames needed to engage: the pose must be held for 100ms (frames are 33ms). */
 const ENGAGE = 5;
+
+/**
+ * Frames for a hold longer than `bridgeMs` (200ms), after which a clutch
+ * resumes without a jump instead of carrying on as if never lost.
+ */
+const LONG_HOLD = 8;
 
 function run(tracker: GestureTracker, frames: Array<Point[] | null>) {
   const events: ClutchEvent[] = [];
@@ -203,9 +210,10 @@ test("clutch goes on hold while the fingertips are off the edge of the frame", (
   const events = run(tracker, [
     ...Array.from({ length: ENGAGE }, () => hand(0.8, 0.5, CLOSED)),
     hand(0.85, 0.5, CLOSED),
-    // Fingertips past the edge: MediaPipe extrapolates these
+    // Fingertips past the edge (longer than bridgeMs): MediaPipe
+    // extrapolates these
     hand(1.05, 0.5, CLOSED),
-    hand(1.2, 0.5, CLOSED),
+    ...Array.from({ length: LONG_HOLD - 2 }, () => hand(1.2, 0.5, CLOSED)),
     hand(1.1, 0.5, CLOSED),
     // Back in view, still pinched: the first frame back only re-anchors
     hand(0.88, 0.5, CLOSED),
@@ -289,8 +297,7 @@ test("fingertips off the edge that look open don't release the clutch", () => {
     ...Array.from({ length: ENGAGE }, () => hand(0.9, 0.5, CLOSED)),
     // Partly off the edge: MediaPipe's extrapolated fingertips look open
     hand(1.05, 0.5, OPEN),
-    hand(1.1, 0.5, OPEN),
-    hand(1.1, 0.5, OPEN),
+    ...Array.from({ length: LONG_HOLD }, () => hand(1.1, 0.5, OPEN)),
     // Back in frame, still pinched
     hand(0.95, 0.5, CLOSED),
     hand(0.94, 0.5, CLOSED),
@@ -478,8 +485,7 @@ test("one hand that comes back with the other label resumes its clutch", () => {
   const tracker = new GestureTracker(); // maxHands 1
   const events = runLabeled(tracker, [
     ...Array.from({ length: ENGAGE }, () => [R(hand(0.5, 0.5, CLOSED))]),
-    [],
-    [],
+    ...Array.from({ length: LONG_HOLD }, () => []),
     // Back somewhere else, now labelled Left, still pinched
     [L(hand(0.2, 0.3, CLOSED))],
     ...Array.from({ length: 5 }, (_, i) => [L(hand(0.19 - 0.01 * i, 0.3, CLOSED))]),
@@ -522,7 +528,7 @@ test("with two hands, a relabeled hand near the held clutch takes it over", () =
   const tracker = new GestureTracker(undefined, 2);
   const events = runLabeled(tracker, [
     ...Array.from({ length: ENGAGE }, () => [R(hand(0.8, 0.5, CLOSED))]),
-    [],
+    ...Array.from({ length: LONG_HOLD }, () => []),
     [L(hand(0.75, 0.55, CLOSED))],
     [L(hand(0.74, 0.55, CLOSED))],
   ]);
@@ -646,4 +652,249 @@ test("recorded: every deliberate OK sign engages", () => {
   const events = replay("ok-signs.json");
   const starts = events.filter((e) => e.type === "start");
   assert.equal(starts.length, 7, starts.map((e) => `${e.hand}@${e.t}`).join(", "));
+});
+
+/**
+ * Synthetic fist: the `hand()` skeleton with all four fingers curled, the
+ * index one finger's width beside the middle.
+ */
+function fist(cx: number, cy: number): Point[] {
+  const lm = hand(cx, cy, 0.02, 0, true);
+  const dx = lm[9].x - lm[13].x;
+  const dy = lm[9].y - lm[13].y;
+  for (const k of [5, 6, 7, 8]) {
+    lm[k] = { x: lm[k + 4].x + dx, y: lm[k + 4].y + dy, z: 0 };
+  }
+  return lm;
+}
+
+/** Frames needed to engage a fist: held for 150ms (frames are 33ms). */
+const FIST_ENGAGE = 6;
+
+test("fist engages, moves with the knuckles, releases when the hand opens", () => {
+  const tracker = new GestureTracker();
+  const frames = [
+    ...Array.from({ length: FIST_ENGAGE }, () => fist(0.5, 0.5)),
+    ...Array.from({ length: 20 }, (_, i) => fist(0.5 + 0.01 * (i + 1), 0.5)),
+    // Releasing a fist takes 3 open frames
+    hand(0.7, 0.5, OPEN),
+    hand(0.7, 0.5, OPEN),
+    hand(0.7, 0.5, OPEN),
+  ];
+  const events = run(tracker, frames);
+  assert.deepEqual(
+    events.filter((e) => e.type !== "move").map((e) => `${e.type}:${e.gesture}`),
+    ["start:fist", "end:fist"]
+  );
+  const moves = events.filter((e) => e.type === "move");
+  assert.ok(moves.every((e) => e.gesture === "fist"));
+  // Raw x increases to the right of the image, which is the user's left.
+  const dx = moves.reduce((sum, e) => sum + e.dx, 0);
+  assert.ok(dx < -0.1, `dx ${dx}`);
+  // The fist point is the middle of the knuckles.
+  const start = events[0];
+  const lm = fist(0.5, 0.5);
+  const knuckles = [5, 9, 13, 17].reduce((sum, i) => sum + lm[i].x, 0) / 4;
+  assert.ok(Math.abs(start.x - (1 - knuckles)) < 1e-6);
+});
+
+test("fist doesn't engage until held for 150ms", () => {
+  const tracker = new GestureTracker();
+  const frames = [
+    ...Array.from({ length: FIST_ENGAGE - 1 }, () => fist(0.5, 0.5)),
+    hand(0.5, 0.5, OPEN),
+  ];
+  assert.deepEqual(run(tracker, frames), []);
+});
+
+test("a fist with its fingers at the edge goes on hold; the wrist off the edge doesn't", () => {
+  const tracker = new GestureTracker();
+  // Knuckles at y=0.85: the wrist (0.2 frame widths lower) is off the
+  // bottom, but the fingers are in view.
+  const low = fist(0.5, 0.5);
+  const shift = (lm: Point[], dy: number) => lm.map((p) => ({ ...p, y: p.y + dy }));
+  const events = run(tracker, [
+    ...Array.from({ length: FIST_ENGAGE }, () => low),
+    shift(low, 0.35),
+    shift(low, 0.36),
+  ]);
+  assert.deepEqual(events.map((e) => e.type), ["start", "move", "move"]);
+  const { visuals } = tracker.update(
+    [{ label: "Right", landmarks: shift(low, 0.5) }],
+    1000,
+    ASPECT
+  );
+  assert.equal(visuals[0].state, "suspended");
+  assert.equal(visuals[0].gesture, "fist");
+});
+
+test("an engaged pinch stays a pinch when the hand curls into a fist", () => {
+  const tracker = new GestureTracker();
+  const events = run(tracker, [
+    ...Array.from({ length: ENGAGE }, () => hand(0.5, 0.5, CLOSED)),
+    ...Array.from({ length: 10 }, () => fist(0.5, 0.5)),
+  ]);
+  assert.deepEqual(
+    [...new Set(events.map((e) => `${e.type === "start" ? "start" : "other"}:${e.gesture}`))],
+    ["start:pinch", "other:pinch"]
+  );
+});
+
+test("a smaller hand mostly on top of a bigger one is dropped as a ghost", () => {
+  const real = { label: "Right", landmarks: hand(0.5, 0.5, OPEN) };
+  const shrink = (lm: Point[], k: number) =>
+    lm.map((p) => ({ x: 0.5 + (p.x - 0.5) * k, y: 0.5 + (p.y - 0.5) * k, z: p.z }));
+  const ghost = { label: "Right", landmarks: shrink(real.landmarks, 0.5) };
+  // The ghost is listed first, as MediaPipe sometimes does.
+  assert.deepEqual(dropGhostHands([ghost, real]), [real]);
+  const other = { label: "Left", landmarks: hand(0.15, 0.5, OPEN) };
+  assert.deepEqual(dropGhostHands([real, other]), [real, other]);
+});
+
+test("recorded: fists from every angle engage as fists, and nothing gets stuck", () => {
+  const events = replay("fists.json");
+  const starts = events.filter((e) => e.type === "start");
+  const desc = starts.map((e) => `${e.gesture}:${e.hand}@${e.t}`).join(", ");
+  assert.ok(starts.every((e) => e.gesture === "fist" && e.hand === "Right"), desc);
+  // One start within each of the three fists (MediaPipe loses the side-on
+  // fist for half a second, so that one may release and re-engage).
+  for (const [from, to] of [[1500, 3000], [16000, 18000], [29000, 31000]]) {
+    assert.ok(starts.some((e) => e.t >= from && e.t <= to), `${from}-${to}: ${desc}`);
+  }
+  // Every clutch released when the hand opened: none left engaged by a ghost.
+  const open = new Map<string, number>();
+  for (const e of events) {
+    if (e.type === "start") open.set(e.hand, (open.get(e.hand) ?? 0) + 1);
+    if (e.type === "end") open.set(e.hand, (open.get(e.hand) ?? 0) - 1);
+  }
+  assert.ok([...open.values()].every((n) => n === 0), desc);
+});
+
+test("recorded: relaxed hands, dropping hands and finger guns don't engage a fist", () => {
+  const starts = replay("not-fists.json").filter((e) => e.type === "start");
+  assert.deepEqual(
+    starts.map((e) => `${e.gesture}:${e.hand}`).sort(),
+    ["pinch:Left", "pinch:Right"],
+    starts.map((e) => `${e.gesture}:${e.hand}@${e.t}`).join(", ")
+  );
+});
+
+test("recorded: OK signs and dropping hands never engage a fist", () => {
+  for (const name of ["ok-signs.json", "hand-drops.json"]) {
+    assert.ok(replay(name).every((e) => e.gesture === "pinch"), name);
+  }
+});
+
+test("a brief dropout mid-move keeps the movement made meanwhile", () => {
+  for (const gesture of ["pinch", "fist"] as const) {
+    const pose = (x: number) => (gesture === "fist" ? fist(x, 0.5) : hand(x, 0.5, CLOSED));
+    const tracker = new GestureTracker();
+    const events = run(tracker, [
+      ...Array.from({ length: gesture === "fist" ? FIST_ENGAGE : ENGAGE }, () => pose(0.5)),
+      pose(0.52),
+      null, // lost for one frame while moving
+      pose(0.6),
+      pose(0.62),
+    ]);
+    assert.deepEqual(events.map((e) => e.type), ["start", "move", "move", "move"], gesture);
+    // Every raw-x step counts, including the one across the gap: 0.5 -> 0.62
+    // is 0.12 toward the user's left. Smoothing lags a little at the end.
+    const dx = events.reduce((sum, e) => sum + e.dx, 0);
+    assert.ok(dx < -0.1 && dx > -0.12 - 1e-9, `${gesture}: dx=${dx}`);
+  }
+});
+
+test("after a long hold, a clutch resumes from where the hand is, without a jump", () => {
+  const tracker = new GestureTracker();
+  const events = run(tracker, [
+    ...Array.from({ length: FIST_ENGAGE }, () => fist(0.5, 0.5)),
+    ...Array.from({ length: LONG_HOLD }, () => null),
+    fist(0.3, 0.5),
+    fist(0.29, 0.5),
+  ]);
+  assert.deepEqual(events.map((e) => e.type), ["start", "move"]);
+  // 0.3 -> 0.29 is a small step right; the 0.2 jump while gone doesn't count.
+  assert.ok(events[1].dx > 0 && events[1].dx < 0.011, `dx=${events[1].dx}`);
+});
+
+test("a fist that looks open for a single frame keeps moving", () => {
+  // Motion blur on a fast fist can make the fingers look open for a frame.
+  // The fist's point (the knuckles) doesn't move as fingers open, so that
+  // frame's movement still counts (a pinch would freeze it instead).
+  const tracker = new GestureTracker();
+  const frames = [
+    ...Array.from({ length: FIST_ENGAGE }, () => fist(0.5, 0.5)),
+    fist(0.52, 0.5),
+    hand(0.54, 0.5, OPEN),
+    fist(0.56, 0.5),
+  ];
+  // Put the open hand's knuckles where a fist at 0.54 would have them.
+  const k = (lm: Point[]) => [5, 9, 13, 17].reduce((s, i) => s + lm[i].x, 0) / 4;
+  const shift = k(fist(0.54, 0.5)) - k(frames[FIST_ENGAGE + 1]);
+  frames[FIST_ENGAGE + 1] = frames[FIST_ENGAGE + 1].map((p) => ({ ...p, x: p.x + shift }));
+  const events = run(tracker, frames);
+  assert.deepEqual(events.map((e) => e.type), ["start", "move", "move", "move"]);
+});
+
+test("recorded: fast fist shakes don't drift", () => {
+  const fixture = JSON.parse(
+    readFileSync(`${import.meta.dirname}/fixtures/fist-shakes.json`, "utf8")
+  );
+  const tracker = new GestureTracker(undefined, 2);
+  const aspect = fixture.height / fixture.width;
+  const knuckles = (lm: number[][]) => 1 - [5, 9, 13, 17].reduce((s, i) => s + lm[i][0], 0) / 4;
+  let start: number | undefined;
+  let last = 0;
+  let sum = 0;
+  const errors: string[] = [];
+  let fists = 0;
+  for (const frame of fixture.frames) {
+    const hands = frame.hands.map((h: { label: string; landmarks: number[][] }) => ({
+      label: h.label,
+      landmarks: h.landmarks.map(([x, y, z]) => ({ x, y, z })),
+    }));
+    const { events, visuals } = tracker.update(hands, frame.t, aspect);
+    const right = frame.hands.find((h: { label: string }) => h.label === "Right");
+    const engaged = visuals.some((v) => v.hand === "Right" && v.state !== "idle" && v.state !== "suspended");
+    for (const e of events.filter((e) => e.hand === "Right" && e.gesture === "fist")) {
+      if (e.type === "start") {
+        start = knuckles(right.landmarks);
+        last = start;
+        sum = 0;
+        fists += 1;
+      } else if (e.type === "move") {
+        sum += e.dx;
+      } else if (start !== undefined) {
+        // Compare with the knuckles' last position while engaged.
+        if (Math.abs(sum - (last - start)) > 0.1) {
+          errors.push(`fist at ${e.t}ms: moved ${(last - start).toFixed(3)}, events say ${sum.toFixed(3)}`);
+        }
+        start = undefined;
+      }
+    }
+    if (start !== undefined && right && engaged) last = knuckles(right.landmarks);
+  }
+  assert.ok(fists >= 3, `only ${fists} fists`);
+  assert.deepEqual(errors, []);
+});
+
+test("recorded: a fist pointed at the camera stays a fist", () => {
+  // Fingers pointing down, then a fist turned through several orientations
+  // (including straight at the camera) from 3.3 to 18.9 s, then fingers
+  // pointing down again. The fist must engage once and hold throughout.
+  const events = replay("punch.json").filter((e) => e.type !== "move");
+  assert.equal(events[0]?.type, "start");
+  assert.ok(events[0].t < 4000, `started at ${events[0].t}`);
+  assert.equal(events[0].gesture, "fist");
+  const ends = events.filter((e) => e.type === "end");
+  assert.ok(ends.length === 0 || ends[0].t > 18900, events.map((e) => `${e.type}@${e.t}`).join(", "));
+  assert.equal(events.filter((e) => e.type === "start").length, 1);
+});
+
+test("recorded: a fist with its fingers curled toward the camera isn't a pinch", () => {
+  const starts = replay("fists-facing-camera.json").filter((e) => e.type === "start");
+  assert.ok(
+    starts.every((e) => e.gesture !== "pinch"),
+    starts.map((e) => `${e.gesture}@${e.t}`).join(", ")
+  );
 });
