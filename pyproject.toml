@@ -24,6 +24,16 @@ dev = ["watchfiles", "jupyterlab"]
 # https://peps.python.org/pep-0735/
 [dependency-groups]
 dev = ["watchfiles", "jupyterlab"]
+# Everything the apps in examples/ need beyond handwave itself:
+# `uv run --group examples ...`
+examples = [
+    "jupyterlab",
+    "marimo",
+    "napari[pyqt6]",
+    "numpy",
+    "shiny",
+    "shinywidgets",
+]
 
 
 [tool.hatch.build]

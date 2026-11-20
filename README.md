@@ -151,7 +151,7 @@ We recommend using [uv](https://github.com/astral-sh/uv) for development.
 It will automatically manage virtual environments and dependencies for you.
 
 ```sh
-uv run jupyter lab example.ipynb
+uv run jupyter lab examples/notebook/example.ipynb
 ```
 
 Alternatively, create and manage your own virtual environment:
@@ -160,8 +160,23 @@ Alternatively, create and manage your own virtual environment:
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-jupyter lab example.ipynb
+jupyter lab examples/notebook/example.ipynb
 ```
+
+### Running the examples
+
+The apps in `examples/` need a few more packages (marimo, Shiny, napari),
+collected in the `examples` dependency group:
+
+```sh
+uv run --group examples jupyter lab examples/notebook/example.ipynb
+uv run --group examples marimo edit examples/marimo/example.py
+uv run --group examples marimo edit examples/napari/example.py
+uv run --group examples shiny run examples/shiny/app.py
+```
+
+Without uv, `pip install --group examples` (pip 25.1 or later) installs the
+same packages.
 
 The widget front-end code is built with esbuild. After setting up Python,
 make sure to install the JavaScript build dependencies locally:
@@ -177,6 +192,6 @@ rebuild JavaScript as you make changes:
 npm run dev
 ```
 
-Open `example.ipynb` in JupyterLab, VS Code, or your favorite editor
+Open `examples/notebook/example.ipynb` in JupyterLab, VS Code, or your favorite editor
 to start developing. Changes made in `js/` will be reflected
 in the notebook.
