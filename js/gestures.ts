@@ -217,9 +217,18 @@ export interface ClutchOptions {
    * An engaged gun releases when the index curls (3D straightness below
    * this; recorded guns stayed above 0.69 from every angle, fists measured
    * 0.35-0.44) or another finger is extended (see `fistReleaseReach`), for
-   * `fistReleaseFrames` frames.
+   * `gunReleaseMs`.
    */
   gunReleaseIndexStraightness: number;
+  /**
+   * How long (ms) a gun must look open to release. Until then its rotation
+   * is held, and if it closes up again, one move makes up for the turn
+   * meanwhile, so the total turn isn't lost. Turning fast, motion blur made
+   * the index look curled for 20-40 ms at a time; a release counted in
+   * frames ended the gun mid-turn, and the next gun started from a
+   * different place.
+   */
+  gunReleaseMs: number;
   /**
    * Clap: two hands become one (MediaPipe reports clasped hands as a single
    * hand) between where the two were, within `clapWindowMs` of their being
@@ -229,9 +238,17 @@ export interface ClutchOptions {
    * of motion blur, then reappearing as one) within 100-250 ms. Pressed
    * together slowly, palm to palm, the two palm centers stay about 1.2 hand
    * sizes apart before merging.
+   *
+   * A single clap is only the first half of a double clap: the second
+   * must come between `doubleClapMinMs` and `doubleClapMaxMs` after it.
+   * Single claps happened by accident too often to reset a view on. In
+   * recorded double claps (fixture `double-claps.json`) the second came
+   * 560-760 ms after the first.
    */
   clapMinSpan: number;
   clapWindowMs: number;
+  doubleClapMinMs: number;
+  doubleClapMaxMs: number;
   /**
    * Reel: with both hands making double-barrelled finger guns (index and
    * middle fingers extended, reach at least `fistReleaseReach`; ring and
@@ -277,8 +294,11 @@ export const defaultClutchOptions: ClutchOptions = {
   gunEngageIndexReach: 1.4,
   gunEngageThumb: 0.6,
   gunReleaseIndexStraightness: 0.6,
+  gunReleaseMs: 100,
   clapMinSpan: 2,
   clapWindowMs: 300,
+  doubleClapMinMs: 250,
+  doubleClapMaxMs: 1000,
   reelCurledReach: 1.5,
   reelMinSpeed: 1,
   reelAnchorMaxSpeed: 3,
@@ -302,10 +322,10 @@ export interface ReelVisual {
   progress: number;
 }
 
-/** Two hands clapping together. */
+/** Two hands clapping together twice (see `ClutchOptions.doubleClapMinMs`). */
 export interface ClapEvent {
   type: "clap";
-  /** Where the hands met, 0 (user's left) to 1 (user's right), mirrored like the preview. */
+  /** Where the hands met the second time, 0 (user's left) to 1 (user's right), mirrored like the preview. */
   x: number;
   /** Where the hands met, 0 (top) to 1 (bottom). */
   y: number;
@@ -458,6 +478,8 @@ export class HandClutch {
   /** Recent palm positions (frame widths) for measuring speed. */
   private palmTrail: Array<{ t: number; x: number; y: number }> = [];
   private aboveCount = 0;
+  /** When an engaged gun started to look open (see `gunReleaseMs`). */
+  private openSince: number | undefined;
   // Positions are in frame units; speeds of ~1 frame/sec are typical.
   private fu = new OneEuroFilter(1.5, 8);
   private fy = new OneEuroFilter(1.5, 8);
@@ -623,6 +645,25 @@ export class HandClutch {
         // the point and openness can't be trusted: put the clutch on hold,
         // as if the hand was lost.
         this.suspend(tMs);
+      } else if (g === "gun") {
+        if (open > releaseAt) {
+          this.openSince ??= tMs;
+          if (tMs - this.openSince >= opts.gunReleaseMs) {
+            events.push(this.event("end", f, tMs));
+            this.disengage();
+          } else {
+            // Maybe releasing, maybe motion blur: hold the rotation (and
+            // `last`) until it's clear, so a release doesn't swing the
+            // view as the index curls.
+            frozen = true;
+          }
+        } else {
+          // Closed (again): one move covers any turn made while it looked
+          // open.
+          this.openSince = undefined;
+          events.push(this.event("move", f, tMs));
+          this.last = f;
+        }
       } else {
         this.aboveCount = open > releaseAt ? this.aboveCount + 1 : 0;
         if (
@@ -724,6 +765,7 @@ export class HandClutch {
     this.state = "suspended";
     this.suspendedAt = tMs;
     this.aboveCount = 0;
+    this.openSince = undefined;
   }
 
   /** Palm speed over the last SPEED_WINDOW_MS, in frame widths per second. */
@@ -749,6 +791,7 @@ export class HandClutch {
     this.engageGesture = undefined;
     this.engageSince = undefined;
     this.aboveCount = 0;
+    this.openSince = undefined;
     this.last = undefined;
     this.anchor = undefined;
   }
@@ -907,6 +950,24 @@ const GHOST_OVERLAP = 0.3;
  * Drops hands that mostly overlap a bigger hand (see `GHOST_OVERLAP`).
  * Exported for testing.
  */
+/** Number of landmarks MediaPipe reports per hand. */
+const LANDMARK_COUNT = 21;
+
+/**
+ * Whether `landmarks` is a whole hand: 21 points with finite coordinates.
+ * MediaPipe occasionally sent something else; reading a missing landmark
+ * threw, which froze the widget's camera loop.
+ */
+export function isWholeHand(landmarks: Point[] | undefined): boolean {
+  return (
+    Array.isArray(landmarks) &&
+    landmarks.length === LANDMARK_COUNT &&
+    landmarks.every(
+      (p) => p != null && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)
+    )
+  );
+}
+
 export function dropGhostHands<H extends { landmarks: Point[] }>(
   hands: H[]
 ): H[] {
@@ -988,6 +1049,8 @@ export class GestureTracker {
   /** Labels MediaPipe reported in the previous frame. */
   private prevLabels = new Set<string>();
   private claps = new ClapDetector();
+  /** The first clap of a double clap, until the second comes or it's too late. */
+  private firstClap: ClapEvent | undefined;
   private reel = new ReelDetector();
 
   constructor(opts: ClutchOptions = { ...defaultClutchOptions }, maxHands = 1) {
@@ -1002,14 +1065,17 @@ export class GestureTracker {
   ): {
     events: ClutchEvent[];
     visuals: ClutchVisual[];
+    /** Double claps, as the second clap. */
     claps: ClapEvent[];
+    /** Single claps that could be the first of a double clap, for feedback. */
+    firstClaps: ClapEvent[];
     reels: ReelEvent[];
     reelVisual?: ReelVisual;
   } {
     const events: ClutchEvent[] = [];
     const visuals: ClutchVisual[] = [];
     const seen = new Set<string>();
-    hands = dropGhostHands(hands);
+    hands = dropGhostHands(hands.filter((h) => isWholeHand(h.landmarks)));
     const clap = this.claps.update(
       hands.map((h) => h.landmarks),
       tMs,
@@ -1070,10 +1136,24 @@ export class GestureTracker {
     // releases it first). This also stops a fist that's moving toward where
     // the other hand just left the frame from counting as one.
     const holding = [...this.clutches.values()].some((c) => c.state === "engaged");
+    const claps: ClapEvent[] = [];
+    const firstClaps: ClapEvent[] = [];
+    if (clap && !holding) {
+      const gap = this.firstClap ? clap.t - this.firstClap.t : Infinity;
+      if (gap >= this.opts.doubleClapMinMs && gap <= this.opts.doubleClapMaxMs) {
+        claps.push(clap);
+        this.firstClap = undefined;
+      } else {
+        // Too soon or too late to be the second: it may be the first.
+        firstClaps.push(clap);
+        this.firstClap = clap;
+      }
+    }
     return {
       events,
       visuals,
-      claps: clap && !holding ? [clap] : [],
+      claps,
+      firstClaps,
       reels: reel.event ? [reel.event] : [],
       reelVisual: reel.visual,
     };
@@ -1141,10 +1221,22 @@ const PINCH_DEPTH_WEIGHT = 0.25;
  */
 const CLAP_MIDDLE = 0.2;
 
+/**
+ * Smallest the merged hand of a clap can be (palm length), relative to the
+ * two hands just before. In recorded claps it measured 0.5-1.0. Hands
+ * dropping out of frame, one leaving first, left a sliver of the other
+ * (0.23) that drifted between where the two had been.
+ */
+const CLAP_MIN_MERGED_SIZE = 0.35;
+
 /** Recognizes claps (see `ClutchOptions.clapMinSpan`). */
 export class ClapDetector {
-  /** Recent frames with two hands: their palm centers, and how far apart. */
-  private pairs: Array<{ t: number; a: number[]; b: number[]; span: number }> = [];
+  /**
+   * Recent frames with two hands: their palm centers, how far apart (in
+   * hand sizes), and their average hand size (frame widths).
+   */
+  private pairs: Array<{ t: number; a: number[]; b: number[]; span: number; size: number }> =
+    [];
 
   /** `hands` must already be free of ghosts (see `dropGhostHands`). */
   update(
@@ -1157,12 +1249,14 @@ export class ClapDetector {
     if (hands.length === 2) {
       const [a, b] = hands.map((lm) => palmCenter(lm, aspect));
       const size = (palmLength(hands[0], aspect) + palmLength(hands[1], aspect)) / 2;
-      this.pairs.push({ t: tMs, a, b, span: Math.hypot(b[0] - a[0], b[1] - a[1]) / size });
+      this.pairs.push({ t: tMs, a, b, span: Math.hypot(b[0] - a[0], b[1] - a[1]) / size, size });
       return null;
     }
     if (hands.length !== 1 || this.pairs.length === 0) return null;
     const widest = this.pairs.reduce((m, p) => (p.span > m.span ? p : m));
     if (widest.span < opts.clapMinSpan) return null;
+    const size = Math.max(...this.pairs.map((p) => p.size));
+    if (palmLength(hands[0], aspect) < CLAP_MIN_MERGED_SIZE * size) return null;
     // Where the remaining hand is along the line between the two.
     const [ax, ay] = widest.a;
     const [bx, by] = widest.b;

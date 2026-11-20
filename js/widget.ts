@@ -11,6 +11,7 @@ import {
   ClutchVisual,
   defaultClutchOptions,
   GestureTracker,
+  isWholeHand,
   ReelVisual,
 } from "./gestures";
 
@@ -144,10 +145,15 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
   /** The latest clap, while its flash is still showing on the preview. */
   let lastClap: ClapEvent | undefined;
+  /** Whether `lastClap` was the first of a double clap (a smaller flash). */
+  let lastClapFirst = false;
   /** Reeling feedback for the current frame, if the hands are in position. */
   let reel: ReelVisual | undefined;
   /** The latest reel step, for its flash on the preview. */
   let lastReel: { t: number; direction: number } | undefined;
+
+  /** Whether a malformed hand from MediaPipe has been logged already. */
+  let loggedMalformedHand = false;
 
   /** Runs gesture recognition; returns visuals to draw on the preview. */
   function updateGestures(results: HandTrackResults): ClutchVisual[] {
@@ -155,13 +161,22 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       label: flipHand(results.multiHandedness?.[i]?.label ?? "Right"),
       landmarks,
     }));
+    if (!loggedMalformedHand && !hands.every((h) => isWholeHand(h.landmarks))) {
+      // The tracker skips these; log one, to see what MediaPipe sent.
+      loggedMalformedHand = true;
+      console.warn(
+        "handwave: skipping a malformed hand from MediaPipe",
+        hands.map((h) => h.landmarks?.length),
+        JSON.stringify(results.multiHandLandmarks)?.slice(0, 2000)
+      );
+    }
     // MediaPipe normalizes landmarks by the camera frame's actual size,
     // which can differ from the requested width/height.
     const aspect =
       videoEl.videoWidth > 0
         ? videoEl.videoHeight / videoEl.videoWidth
         : canvasEl.height / canvasEl.width;
-    const { events, visuals, claps, reels, reelVisual } = tracker.update(
+    const { events, visuals, claps, firstClaps, reels, reelVisual } = tracker.update(
       hands,
       performance.now(),
       aspect
@@ -172,6 +187,10 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     if (claps.length > 0) {
       model.send({ type: "handwave:clap", events: claps });
       lastClap = claps[claps.length - 1];
+      lastClapFirst = false;
+    } else if (firstClaps.length > 0) {
+      lastClap = firstClaps[firstClaps.length - 1];
+      lastClapFirst = true;
     }
     if (reels.length > 0) {
       model.send({ type: "handwave:reel", events: reels });
@@ -289,7 +308,7 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     if (lastClap) {
       const age = (performance.now() - lastClap.t) / CLAP_FLASH_MS;
       if (age < 1) {
-        drawClap(canvasCtx, lastClap, age, canvasEl.width, canvasEl.height);
+        drawClap(canvasCtx, lastClap, age, lastClapFirst, canvasEl.width, canvasEl.height);
       } else {
         lastClap = undefined;
       }
@@ -339,7 +358,11 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     hands.onResults(onResults);
 
     camera = new mp.Camera(videoEl, {
-      onFrame: () => hands.send({ image: videoEl }),
+      // camera_utils only asks for the next frame once this resolves: if it
+      // rejects (an error in onResults, say), the preview and gestures
+      // freeze for good. Log it and carry on instead.
+      onFrame: () =>
+        hands.send({ image: videoEl }).catch((err) => console.error("handwave:", err)),
       width: model.get("width"),
       height: model.get("height"),
     });
@@ -482,21 +505,29 @@ const CLAP_FLASH_MS = 400;
 /**
  * Draws a clap as a ring expanding and fading from where the hands met, in
  * raw landmark coordinates (the caller has already mirrored the context).
- * `age` runs from 0 (just clapped) to 1 (gone).
+ * `age` runs from 0 (just clapped) to 1 (gone). The first clap of a double
+ * clap gets a smaller, thinner ring: it registered, but did nothing yet.
  */
 function drawClap(
   ctx: CanvasRenderingContext2D,
   clap: ClapEvent,
   age: number,
+  first: boolean,
   width: number,
   height: number
 ) {
   ctx.save();
   ctx.globalAlpha = 1 - age;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = first ? 2 : 4;
   ctx.strokeStyle = CLUTCH_COLORS.engaged;
   ctx.beginPath();
-  ctx.arc((1 - clap.x) * width, clap.y * height, 15 + 45 * age, 0, 2 * Math.PI);
+  ctx.arc(
+    (1 - clap.x) * width,
+    clap.y * height,
+    first ? 10 + 15 * age : 15 + 45 * age,
+    0,
+    2 * Math.PI
+  );
   ctx.stroke();
   ctx.restore();
 }

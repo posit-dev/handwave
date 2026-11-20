@@ -91,7 +91,7 @@ If pinches engage too easily or not easily enough, set `debug=True` to see the l
 
 ## Clap
 
-With `max_num_hands=2`, clapping sends a `ClapEvent` to callbacks registered with `on_clap()`, for one-off actions like resetting a view:
+With `max_num_hands=2`, clapping twice (clap, brief pause, clap) sends a `ClapEvent` to callbacks registered with `on_clap()`, for one-off actions like resetting a view:
 
 ```python
 @widget.on_clap
@@ -99,9 +99,9 @@ def on_clap(event):
     reset_view()
 ```
 
-`event.x` and `event.y` are where your hands met, like a clutch event's. The preview shows a cyan ring expanding from that spot.
+`event.x` and `event.y` are where your hands met the second time, like a clutch event's. The preview shows a small cyan ring for the first clap, then a bigger one expanding from where you clapped the second time.
 
-A clap is two hands, at least two hand lengths apart, becoming one (MediaPipe sees clasped hands as a single hand) somewhere between where they were, within 0.3 seconds. Bringing your hands together slowly doesn't count, and neither does one hand leaving the frame. Claps are ignored while either hand is clutching.
+The second clap must come between 0.25 and 1 second after the first; single claps happened by accident too often to act on. A clap is two hands, at least two hand lengths apart, becoming one (MediaPipe sees clasped hands as a single hand) somewhere between where they were, within 0.3 seconds. Bringing your hands together slowly doesn't count, and neither does one hand leaving the frame (or the other being mostly out of it). Claps are ignored while either hand is clutching.
 
 ## Reel
 

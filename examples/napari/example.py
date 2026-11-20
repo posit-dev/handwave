@@ -58,10 +58,14 @@ def _(napari, qt_pump):
 def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
     GRAB_GAIN = 1.5  # canvas widths panned per frame width of fist movement
-    AIM_GAIN = 1.5  # how far the data turns per turn of the hand
+    AIM_GAIN = 3  # how far the data turns per turn of the hand
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
+
+    # Each finger gun's turn since it engaged, and the view at that moment, so
+    # the view follows the hand's total turn and never drifts (see `aim`).
+    aims = {}
 
     # What reeling steps through: all the channels together, then each on its own.
     channel_views = ["all channels", *(layer.name for layer in viewer.layers)]
@@ -86,6 +90,34 @@ def _(math, np, viewer):
         x, y, z = np.asarray(rotvec) / theta
         k = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
         return np.eye(3) + math.sin(theta) * k + (1 - math.cos(theta)) * k @ k
+
+
+    def rotation_vector(m):
+        """Rotation vector (axis times angle) of a rotation matrix."""
+        angle = math.acos(min(1.0, max(-1.0, (np.trace(m) - 1) / 2)))
+        if angle < 1e-9:
+            return np.zeros(3)
+        if angle < math.pi - 1e-3:
+            w = np.array([m[2, 1] - m[1, 2], m[0, 2] - m[2, 0], m[1, 0] - m[0, 1]])
+            return w * angle / (2 * math.sin(angle))
+        # Near a half turn, m + I is (twice) the axis times its transpose.
+        b = m + np.eye(3)
+        axis = b[:, np.argmax(np.linalg.norm(b, axis=0))]
+        return axis / np.linalg.norm(axis) * angle
+
+
+    def nearest_turn(rotvec, previous):
+        """
+        The rotation vector for the same rotation as `rotvec` that's closest to
+        `previous` (adding whole turns about its axis), so a turn past half a
+        turn keeps growing instead of flipping to the other way round.
+        """
+        angle = np.linalg.norm(rotvec)
+        if angle < 1e-9:
+            return rotvec
+        axis = rotvec / angle
+        candidates = [axis * (angle + 2 * math.pi * k) for k in (-2, -1, 0, 1, 2)]
+        return min(candidates, key=lambda c: np.linalg.norm(c - previous))
 
 
     def screen_axes():
@@ -116,19 +148,39 @@ def _(math, np, viewer):
 
     def aim(event):
         """Finger gun: the data turns the way your hand turns."""
-        if event.type != "move" or viewer.dims.ndisplay != 3:
+        if viewer.dims.ndisplay != 3:
             return
         camera = viewer.scene.camera
-        view = np.array(camera.view_direction)
-        up = np.array(camera.up_direction)
-        # Screen axes in world coordinates, as columns: right, down, into the
-        # screen (the same axes as event.drotation).
-        screen = np.stack([np.cross(view, up), -up, view], axis=1)
+        if event.type == "start":
+            view = np.array(camera.view_direction)
+            up = np.array(camera.up_direction)
+            aims[event.hand] = {
+                # Screen axes in world coordinates when the gun engaged, as
+                # columns: right, down, into the screen (the same axes as
+                # event.drotation).
+                "screen": np.stack([np.cross(view, up), -up, view], axis=1),
+                # How the hand has turned since, as a matrix and a rotation vector.
+                "hand": np.eye(3),
+                "turn": np.zeros(3),
+            }
+            return
+        if event.type == "end":
+            aims.pop(event.hand, None)
+            return
+        state = aims.get(event.hand)
+        if state is None:
+            return
+        # Add up the hand's turn since the gun engaged. Turning the view by
+        # AIM_GAIN times each frame's turn would drift: scaled-up 3D turns don't
+        # cancel out, so going out and back left the data turned. Scaling the
+        # total turn instead brings the data back whenever the hand comes back.
+        state["hand"] = rotation_matrix(np.array(event.drotation)) @ state["hand"]
+        state["turn"] = nearest_turn(rotation_vector(state["hand"]), state["turn"])
         # drotation is how the hand physically turned, from the user's point of
         # view: turn the data the same way, as if holding it.
-        turn = rotation_matrix(AIM_GAIN * np.array(event.drotation))
+        turn = rotation_matrix(AIM_GAIN * state["turn"])
         # Turning the data by `turn` is turning the camera's axes the other way.
-        turned = screen @ turn.T
+        turned = state["screen"] @ turn.T
         camera.set_view_direction(turned[:, 2], -turned[:, 1])
 
 
@@ -176,7 +228,7 @@ def _(math, np, viewer):
 
 
     def reset_view(event):
-        """Clap: back to the starting view."""
+        """Double clap: back to the starting view."""
         viewer.reset_view()
 
 
@@ -193,7 +245,7 @@ def _(math, np, viewer):
 
 @app.cell
 def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
-    handwave_widget = HandwaveWidget(max_num_hands=2, width=320, height=240, debug=True)
+    handwave_widget = HandwaveWidget(max_num_hands=2, width=640, height=480, debug=True)
     handwave_widget.on_clutch(drive_napari)
     handwave_widget.on_clap(reset_view)
     handwave_widget.on_reel(step_channel)
@@ -204,8 +256,8 @@ def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
             "Make a fist and move it to drag the data around. Make a finger gun "
             "(index and thumb out) and turn your hand to turn the data. Pinch "
             "with both hands, then spread them apart or bring them together to "
-            "zoom, and turn the line between them to roll the view. Clap to reset "
-            "the view. To step through the channels, point double-barrelled finger "
+            "zoom, and turn the line between them to roll the view. Clap twice "
+            "(clap, brief pause, clap) to reset the view. To step through the channels, point double-barrelled finger "
             "guns (index and middle fingers out) at each other, hold your left hand "
             "still, and circle your right hand like reeling in a fishing line: "
             "clockwise (as you see it in the preview) for the next channel, the "

@@ -71,12 +71,13 @@ class ClutchEvent:
 
 @dataclasses.dataclass(frozen=True)
 class ClapEvent:
-    """Two hands clapping together, delivered to callbacks registered with
-    `HandwaveWidget.on_clap()`. Needs `max_num_hands=2`."""
+    """A double clap (two claps with a brief pause between), delivered to
+    callbacks registered with `HandwaveWidget.on_clap()`. Needs
+    `max_num_hands=2`."""
 
     type: typing.Literal["clap"]
     x: float
-    """Where the hands met, 0 (user's left) to 1 (user's right), mirrored like the preview."""
+    """Where the hands met the second time, 0 (user's left) to 1 (user's right), mirrored like the preview."""
     y: float
     """Where the hands met, 0 (top) to 1 (bottom)."""
     t: float
@@ -162,7 +163,7 @@ class HandwaveWidget(anywidget.AnyWidget):
         return callback
 
     def on_clap(self, callback: ClapCallback, remove: bool = False):
-        """Register a callback for claps (needs `max_num_hands=2`).
+        """Register a callback for double claps (needs `max_num_hands=2`).
 
         The callback receives a `ClapEvent`. Can be used as a decorator:
 
