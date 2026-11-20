@@ -51,6 +51,8 @@ Making a fist clutches too, the same way: hold the fist and move, open your hand
 
 A finger gun (index finger out, thumb out, the other three fingers curled) clutches for turning things in 3D. Its events have `gesture="gun"` and a `drotation`: how your hand turned since the last event, so the thing you're holding can turn with it. If you turn a 3D view with it, give the view depth cues (perspective, an axes indicator): without them, a rotating volume looks the same turning either way, and it's easy to perceive the turn backwards. Hold the pose still for a moment to start it, and curl your index finger or open your hand to let go. Pointing with your thumb tucked in doesn't count. Once it's engaged, you can aim anywhere, including straight at the camera.
 
+A fist's events have a `drotation` too, from your palm and knuckles, so you can also turn things by turning your fist.
+
 ```python
 from scipy.spatial.transform import Rotation
 
@@ -77,7 +79,7 @@ Each pinch produces a `"start"` event, then `"move"` events (one per video frame
 - **dx**, **dy**: Movement since the previous event, in frame widths (so horizontal and vertical movement are scaled the same). Down is positive.
 - **dtheta**: Change in hand roll since the previous event, in radians. Twist your hand like a dial; clockwise is positive.
 - **dscale**: Change in the apparent size of your hand, as a ratio. Greater than 1 means your hand moved toward the camera.
-- **drotation**: Finger gun only (zeros otherwise). Change in your hand's 3D orientation from your point of view, as a rotation vector (axis times angle, in radians) in screen coordinates: x toward your right, y down, z into the screen. It relies on MediaPipe's depth estimate, so it's smoothed.
+- **drotation**: Fist or finger gun (zeros for a pinch). Change in your hand's 3D orientation from your point of view, as a rotation vector (axis times angle, in radians) in screen coordinates: x toward your right, y down, z into the screen. It relies on MediaPipe's depth estimate, so it's smoothed.
 
 Use the relative values (`dx`, `dy`, `dtheta`, `dscale`) rather than absolute positions, so that releasing and re-pinching doesn't make anything jump. Movement is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/).
 

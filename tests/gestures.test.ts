@@ -1033,9 +1033,19 @@ test("a finger gun's rotation holds while it releases", () => {
   }
 });
 
-test("pinch and fist events carry no rotation", () => {
-  const events = replay("fists.json");
-  assert.ok(events.every((e) => e.drotation.every((c) => c === 0)));
+test("pinch events carry no rotation, fist events do", () => {
+  const pinches = replay("ok-signs.json").filter((e) => e.gesture === "pinch");
+  assert.ok(pinches.length > 0);
+  assert.ok(pinches.every((e) => e.drotation.every((c) => c === 0)));
+  // Holding a fist knuckles toward the camera (2-9.5 s; see the fixture's
+  // description), its orientation (from the palm and knuckles, since the
+  // index is curled) barely moves from frame to frame.
+  const fistMoves = replay("fists.json").filter(
+    (e) => e.gesture === "fist" && e.type === "move" && e.t < 9500
+  );
+  const degrees = fistMoves.map((e) => (Math.hypot(...e.drotation) * 180) / Math.PI);
+  assert.ok(degrees.some((d) => d > 0));
+  assert.ok(Math.max(...degrees) < 5, `turned up to ${Math.max(...degrees).toFixed(1)} degrees`);
 });
 
 /**

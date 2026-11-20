@@ -61,7 +61,7 @@ class ClutchEvent:
     t: float
     """Browser timestamp, in milliseconds."""
     drotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    """Finger gun only (zero otherwise): change in the hand's 3D orientation since
+    """Fist or finger gun (zero for a pinch): change in the hand's 3D orientation since
     the last event, as a rotation vector (axis times angle, in radians) in screen
     coordinates: x toward the user's right, y down, z into the screen: the
     hand's physical turn, from the user's point of view. Rotate something by

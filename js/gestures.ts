@@ -356,7 +356,7 @@ export interface ClutchEvent {
   /** Multiplicative change in apparent hand size; > 1 means moving closer. */
   dscale: number;
   /**
-   * Finger gun only (zero otherwise): change in the hand's 3D orientation,
+   * Fist or finger gun (zero for a pinch): change in the hand's 3D orientation,
    * as a rotation vector (axis times angle in radians) in screen
    * coordinates: x toward the user's right, y down, z into the screen.
    * This is the hand's physical turn, from the user's point of view; a
@@ -813,9 +813,11 @@ export class HandClutch {
     aspect: number
   ): Features {
     if (gesture !== this.filterGesture) {
-      // Switching to another gesture's point: don't smooth across the jump.
+      // Switching to another gesture's point (and orientation frame): don't
+      // smooth across the jump.
       this.fu.reset();
       this.fy.reset();
+      for (const f of this.fOrient) f.reset();
       this.filterGesture = gesture;
     }
     // Roll: direction from wrist to middle knuckle, in mirrored, isotropic
@@ -831,7 +833,7 @@ export class HandClutch {
     this.rawAngle = raw;
 
     const palm2d = Math.hypot(ax, ay);
-    const [along, across] = handVectors(lm, aspect);
+    const [along, across] = handVectors(lm, aspect, gesture);
     const v = [...along, ...across].map((c, i) => this.fOrient[i].filter(c, t));
     return {
       u: this.fu.filter(1 - point.x, t),
@@ -859,7 +861,7 @@ export class HandClutch {
       dtheta: f.angle - last.angle,
       dscale: Math.exp(f.logScale - last.logScale),
       drotation:
-        this.gesture === "gun"
+        this.gesture === "gun" || this.gesture === "fist"
           ? rotationVector(mulTranspose(f.orientation, last.orientation))
           : [0, 0, 0],
       t: tMs,
@@ -1497,21 +1499,25 @@ function fingerStraightness3d(lm: Point[], mcp: number, aspect: number): number 
  * out of the hand, averaging the index finger's direction with the palm's
  * (wrist to middle knuckle), and "across" runs from the index knuckle to
  * the pinky's. Holding a gun still, the resulting orientation jittered by
- * about 0.4 degrees per frame before smoothing.
+ * about 0.4 degrees per frame before smoothing. A fist's index is curled,
+ * so for a fist (or a pinch) "along" is the palm's direction alone.
  */
-function handVectors(lm: Point[], aspect: number): [number[], number[]] {
+function handVectors(
+  lm: Point[],
+  aspect: number,
+  gesture: Gesture
+): [number[], number[]] {
   const s = (i: number) => [-lm[i].x, lm[i].y * aspect, -lm[i].z];
   const sub = (a: number[], b: number[]) => a.map((v, k) => v - b[k]);
   const unit = (v: number[]) => {
     const n = Math.hypot(...v) || 1;
     return v.map((c) => c / n);
   };
-  const index = unit(sub(s(INDEX_TIP), s(INDEX_MCP)));
   const palm = unit(sub(s(MIDDLE_MCP), s(WRIST)));
-  return [
-    unit(index.map((c, k) => c + palm[k])),
-    sub(s(PINKY_MCP), s(INDEX_MCP)),
-  ];
+  const across = sub(s(PINKY_MCP), s(INDEX_MCP));
+  if (gesture !== "gun") return [palm, across];
+  const index = unit(sub(s(INDEX_TIP), s(INDEX_MCP)));
+  return [unit(index.map((c, k) => c + palm[k])), across];
 }
 
 /**

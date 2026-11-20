@@ -57,14 +57,14 @@ def _(napari, qt_pump):
 @app.cell
 def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
-    GRAB_GAIN = 3  # canvas widths panned per frame width of fist movement
-    AIM_GAIN = 3  # how far the data turns per turn of the hand
+    GRAB_GAIN = 3  # canvas widths panned per frame width of two-pinch movement
+    AIM_GAIN = 1.5  # how far the data turns per turn of the fist
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
 
-    # Each finger gun's turn since it engaged, and the view at that moment, so
-    # the view follows the hand's total turn and never drifts (see `aim`).
+    # Each fist's turn since it engaged, and the view at that moment, so the
+    # view follows the hand's total turn and never drifts (see `aim`).
     aims = {}
 
     # What reeling steps through: all the channels together, then each on its own.
@@ -135,19 +135,17 @@ def _(math, np, viewer):
         return rx - lx, ry - ly
 
 
-    def grab(event):
-        """Fist: drag the data around, like grabbing it."""
-        if event.type != "move":
-            return
+    def pan(dx, dy):
+        """Drag the data by a hand movement of (dx, dy) frame widths."""
         right, up = screen_axes()
         # Frame widths -> canvas pixels -> world units
         scale = GRAB_GAIN * viewer.window._qt_viewer.canvas.native.width() / viewer.scene.camera.zoom
         center = np.array(viewer.scene.camera.center)
-        viewer.scene.camera.center = tuple(center - scale * (event.dx * right - event.dy * up))
+        viewer.scene.camera.center = tuple(center - scale * (dx * right - dy * up))
 
 
     def aim(event):
-        """Finger gun: the data turns the way your hand turns."""
+        """Fist: the data turns the way your hand turns, as if holding it."""
         if viewer.dims.ndisplay != 3:
             return
         camera = viewer.scene.camera
@@ -155,7 +153,7 @@ def _(math, np, viewer):
             view = np.array(camera.view_direction)
             up = np.array(camera.up_direction)
             aims[event.hand] = {
-                # Screen axes in world coordinates when the gun engaged, as
+                # Screen axes in world coordinates when the fist engaged, as
                 # columns: right, down, into the screen (the same axes as
                 # event.drotation).
                 "screen": np.stack([np.cross(view, up), -up, view], axis=1),
@@ -170,7 +168,7 @@ def _(math, np, viewer):
         state = aims.get(event.hand)
         if state is None:
             return
-        # Add up the hand's turn since the gun engaged. Turning the view by
+        # Add up the hand's turn since the fist engaged. Turning the view by
         # AIM_GAIN times each frame's turn would drift: scaled-up 3D turns don't
         # cancel out, so going out and back left the data turned. Scaling the
         # total turn instead brings the data back whenever the hand comes back.
@@ -185,7 +183,10 @@ def _(math, np, viewer):
 
 
     def pinch(event):
-        """Both hands pinching: spread or bring together to zoom, turn to roll."""
+        """
+        Both hands pinching, like two fingers on a trackpad: move them together
+        to drag, spread or bring together to zoom, turn to roll.
+        """
         if event.type == "start":
             pinches[event.hand] = (event.x, event.y * ASPECT)
             return
@@ -203,6 +204,10 @@ def _(math, np, viewer):
         if math.hypot(bx, by) < 0.02:
             return
         viewer.scene.camera.zoom *= math.hypot(ax, ay) / math.hypot(bx, by)
+        # Drag by how far the point midway between the pinches moved.
+        (blx, bly), (brx, bry) = before["Left"], before["Right"]
+        (alx, aly), (arx, ary) = pinches["Left"], pinches["Right"]
+        pan((alx + arx - blx - brx) / 2, (aly + ary - bly - bry) / 2)
         turn = (math.atan2(ay, ax) - math.atan2(by, bx) + math.pi) % (2 * math.pi) - math.pi
         if viewer.dims.ndisplay == 3:
             # Rotating the camera's up vector by -turn turns the data by +turn
@@ -233,9 +238,8 @@ def _(math, np, viewer):
 
 
     def drive_napari(event):
+        # Finger guns do nothing for now.
         if event.gesture == "fist":
-            grab(event)
-        elif event.gesture == "gun":
             aim(event)
         elif event.gesture == "pinch":
             pinch(event)
