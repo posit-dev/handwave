@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   dropGhostHands,
   GestureTracker,
+  rotationVector,
   type ClutchEvent,
   type Point,
 } from "../js/gestures.ts";
@@ -772,11 +773,15 @@ test("recorded: fists from every angle engage as fists, and nothing gets stuck",
 
 test("recorded: relaxed hands, dropping hands and finger guns don't engage a fist", () => {
   const starts = replay("not-fists.json").filter((e) => e.type === "start");
+  const desc = starts.map((e) => `${e.gesture}:${e.hand}@${e.t}`).join(", ");
+  assert.ok(starts.every((e) => e.gesture !== "fist"), desc);
+  // The two-hand pinches engage as pinches, the finger guns as guns.
   assert.deepEqual(
-    starts.map((e) => `${e.gesture}:${e.hand}`).sort(),
-    ["pinch:Left", "pinch:Right"],
-    starts.map((e) => `${e.gesture}:${e.hand}@${e.t}`).join(", ")
+    starts.filter((e) => e.gesture === "pinch").map((e) => e.hand).sort(),
+    ["Left", "Right"],
+    desc
   );
+  assert.ok(starts.some((e) => e.gesture === "gun" && e.t > 30600), desc);
 });
 
 test("recorded: OK signs and dropping hands never engage a fist", () => {
@@ -897,4 +902,86 @@ test("recorded: a fist with its fingers curled toward the camera isn't a pinch",
     starts.every((e) => e.gesture !== "pinch"),
     starts.map((e) => `${e.gesture}@${e.t}`).join(", ")
   );
+});
+
+test("recorded: a finger gun engages, holds while aimed anywhere, and isn't a pointing hand", () => {
+  const starts = replay("finger-gun.json")
+    .filter((e) => e.type === "start")
+    .map((e) => `${e.gesture}@${(e.t / 1000).toFixed(1)}`);
+  // Gun, held through all the aiming (toward the camera included) until the
+  // fist; gun again; the OK sign. Pointing with the thumb tucked in (36.6-40.3
+  // s) engages nothing.
+  assert.deepEqual(
+    starts.map((s) => s.split("@")[0]),
+    ["gun", "fist", "gun", "pinch"],
+    starts.join(", ")
+  );
+  const [gun1, fist, gun2] = starts.map((s) => Number(s.split("@")[1]));
+  assert.ok(gun1 < 3 && fist > 27 && fist < 28.5 && gun2 > 29 && gun2 < 30, starts.join(", "));
+});
+
+/** Rotation matrix (row-major) from a rotation vector. */
+function fromRotationVector(w: number[]): number[] {
+  const t = Math.hypot(...w);
+  if (t < 1e-12) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const [x, y, z] = w.map((c) => c / t);
+  const c = Math.cos(t), s = Math.sin(t), C = 1 - c;
+  return [
+    c + x * x * C, x * y * C - z * s, x * z * C + y * s,
+    y * x * C + z * s, c + y * y * C, y * z * C - x * s,
+    z * x * C - y * s, z * y * C + x * s, c + z * z * C,
+  ];
+}
+
+function multiply(a: number[], b: number[]): number[] {
+  return [0, 1, 2].flatMap((r) =>
+    [0, 1, 2].map((c) => a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c])
+  );
+}
+
+test("rotationVector inverts fromRotationVector", () => {
+  for (const w of [[0.3, -0.2, 0.5], [0, 0, 1e-4], [2.5, 0.1, -0.4]]) {
+    const back = rotationVector(fromRotationVector(w));
+    back.forEach((c, i) => assert.ok(Math.abs(c - w[i]) < 1e-9, `${back} vs ${w}`));
+  }
+});
+
+test("recorded: a finger gun's rotation follows the hand", () => {
+  // Composing every drotation should reproduce how the hand turned, from
+  // the user's point of view (x right, y down, z toward the screen). From
+  // pointing up (4 s) to pointing left (6 s) is a quarter turn
+  // counterclockwise on screen: about -z. From pointing up to pointing down
+  // (12.5 s), the barrel swings forward, past the screen: about -x.
+  let rotation = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const at: Record<string, number[]> = {};
+  const fixture = JSON.parse(
+    readFileSync(`${import.meta.dirname}/fixtures/finger-gun.json`, "utf8")
+  );
+  const tracker = new GestureTracker(undefined, 2);
+  for (const frame of fixture.frames) {
+    const hands = frame.hands.map((h: { label: string; landmarks: number[][] }) => ({
+      label: h.label,
+      landmarks: h.landmarks.map(([x, y, z]) => ({ x, y, z })),
+    }));
+    for (const e of tracker.update(hands, frame.t, fixture.height / fixture.width).events) {
+      if (e.gesture === "gun" && e.type === "move") {
+        rotation = multiply(fromRotationVector(e.drotation), rotation);
+      }
+    }
+    if (frame.t >= 4000 && !at.up) at.up = rotation;
+    if (frame.t >= 6000 && !at.left) at.left = rotation;
+    if (frame.t >= 12500 && !at.down) at.down = rotation;
+  }
+  const upT = [0, 3, 6, 1, 4, 7, 2, 5, 8].map((i) => at.up[i]);
+  const w = rotationVector(multiply(at.left, upT));
+  const degrees = (Math.hypot(...w) * 180) / Math.PI;
+  assert.ok(degrees > 70 && degrees < 100, `turned ${degrees.toFixed(0)} degrees`);
+  assert.ok(w[2] / Math.hypot(...w) < -0.9, `axis ${w.map((c) => c.toFixed(2))}`);
+  const tilt = rotationVector(multiply(at.down, upT));
+  assert.ok(tilt[0] / Math.hypot(...tilt) < -0.9, `axis ${tilt.map((c) => c.toFixed(2))}`);
+});
+
+test("pinch and fist events carry no rotation", () => {
+  const events = replay("fists.json");
+  assert.ok(events.every((e) => e.drotation.every((c) => c === 0)));
 });

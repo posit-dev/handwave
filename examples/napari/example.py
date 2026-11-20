@@ -13,11 +13,10 @@ def _():
     import napari
     import numpy as np
     from qtpy.QtWidgets import QApplication
-    from skimage import data
 
     from handwave import HandwaveWidget
 
-    return HandwaveWidget, QApplication, asyncio, data, math, mo, napari, np
+    return HandwaveWidget, QApplication, asyncio, math, mo, napari, np
 
 
 @app.cell
@@ -38,17 +37,20 @@ def _(QApplication, asyncio):
 
 
 @app.cell
-def _(data, napari, qt_pump):
+def _(napari, qt_pump):
     qt_pump  # start the Qt pump first
     viewer = napari.Viewer(ndisplay=3)
-    # Synthetic 3D volume, so no download is needed
-    volume = data.binary_blobs(length=128, n_dim=3, volume_fraction=0.05, rng=0)
-    viewer.add_image(
-        volume.astype(float),
-        name="blobs",
-        colormap="magenta",
-        rendering="attenuated_mip",
-    )
+    # napari's canonical sample: a 3D fluorescence image of cells, as two image
+    # layers (membranes and nuclei). The first use downloads 11 MB via
+    # scikit-image.
+    viewer.open_sample("napari", "cells3d")
+    # Depth cues, so it's clear which way the data turns: a plain maximum
+    # intensity projection with no perspective looks the same turning either
+    # way (like a spinning silhouette).
+    viewer.scene.camera.perspective = 45
+    viewer.axes.visible = True
+    for _layer in viewer.layers:
+        _layer.rendering = "attenuated_mip"
     return (viewer,)
 
 
@@ -56,6 +58,7 @@ def _(data, napari, qt_pump):
 def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
     GRAB_GAIN = 1.5  # canvas widths panned per frame width of fist movement
+    AIM_GAIN = 1.5  # how far the data turns per turn of the hand
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
@@ -69,6 +72,16 @@ def _(math, np, viewer):
             + np.cross(axis, vec) * math.sin(theta)
             + axis * np.dot(axis, vec) * (1 - math.cos(theta))
         )
+
+
+    def rotation_matrix(rotvec):
+        """Rotation matrix for a rotation vector (axis times angle)."""
+        theta = np.linalg.norm(rotvec)
+        if theta < 1e-12:
+            return np.eye(3)
+        x, y, z = np.asarray(rotvec) / theta
+        k = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
+        return np.eye(3) + math.sin(theta) * k + (1 - math.cos(theta)) * k @ k
 
 
     def screen_axes():
@@ -95,6 +108,24 @@ def _(math, np, viewer):
         scale = GRAB_GAIN * viewer.window._qt_viewer.canvas.native.width() / viewer.scene.camera.zoom
         center = np.array(viewer.scene.camera.center)
         viewer.scene.camera.center = tuple(center - scale * (event.dx * right - event.dy * up))
+
+
+    def aim(event):
+        """Finger gun: the data turns the way your hand turns."""
+        if event.type != "move" or viewer.dims.ndisplay != 3:
+            return
+        camera = viewer.scene.camera
+        view = np.array(camera.view_direction)
+        up = np.array(camera.up_direction)
+        # Screen axes in world coordinates, as columns: right, down, into the
+        # screen (the same axes as event.drotation).
+        screen = np.stack([np.cross(view, up), -up, view], axis=1)
+        # drotation is how the hand physically turned, from the user's point of
+        # view: turn the data the same way, as if holding it.
+        turn = rotation_matrix(AIM_GAIN * np.array(event.drotation))
+        # Turning the data by `turn` is turning the camera's axes the other way.
+        turned = screen @ turn.T
+        camera.set_view_direction(turned[:, 2], -turned[:, 1])
 
 
     def pinch(event):
@@ -128,6 +159,8 @@ def _(math, np, viewer):
     def drive_napari(event):
         if event.gesture == "fist":
             grab(event)
+        elif event.gesture == "gun":
+            aim(event)
         else:
             pinch(event)
 
@@ -142,9 +175,10 @@ def _(HandwaveWidget, drive_napari, mo):
     mo.vstack([
         widget,
         mo.md(
-            "Make a fist and move it to drag the data around. Pinch with both "
-            "hands, then spread them apart or bring them together to zoom, and "
-            "turn the line between them to roll the view."
+            "Make a fist and move it to drag the data around. Make a finger gun "
+            "(index and thumb out) and turn your hand to turn the data. Pinch "
+            "with both hands, then spread them apart or bring them together to "
+            "zoom, and turn the line between them to roll the view."
         ),
     ])
     return

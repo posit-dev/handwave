@@ -104,7 +104,7 @@ function lerp(a: number, b: number, alpha: number): number {
   return a + alpha * (b - a);
 }
 
-export type Gesture = "pinch" | "fist";
+export type Gesture = "pinch" | "fist" | "gun";
 
 export interface ClutchOptions {
   /** Pinch ratio below which a pinch engages. */
@@ -199,6 +199,27 @@ export interface ClutchOptions {
    * reach but read as straight.
    */
   fistEngageStraightness: number;
+  /**
+   * Finger gun: index finger out, thumb out, the other three curled. To
+   * engage, the index's reach (see `fistEngageReach`) must be at least
+   * `gunEngageIndexReach`; the middle, ring and pinky's reach at most
+   * `fistEngageReach`; and the thumb tip at least `gunEngageThumb` palm
+   * lengths from the middle finger's middle joint. Pointed at the camera,
+   * the index is foreshortened: its reach dropped to 1.4-1.7 (2.0 sideways)
+   * and its straightness in the image to 0.3-0.6, so only 3D measures work.
+   * In recorded data the thumb measured 0.82 or more for a gun, 0.45 or
+   * less when tucked in to point, and about 0.2 in a fist. Held for
+   * `fistEngageMs`.
+   */
+  gunEngageIndexReach: number;
+  gunEngageThumb: number;
+  /**
+   * An engaged gun releases when the index curls (3D straightness below
+   * this; recorded guns stayed above 0.69 from every angle, fists measured
+   * 0.35-0.44) or another finger is extended (see `fistReleaseReach`), for
+   * `fistReleaseFrames` frames.
+   */
+  gunReleaseIndexStraightness: number;
 }
 
 export const defaultClutchOptions: ClutchOptions = {
@@ -217,16 +238,19 @@ export const defaultClutchOptions: ClutchOptions = {
   fistReleaseStraightness: 0.9,
   fistReleaseFrames: 3,
   fistEngageStraightness: 0.6,
+  gunEngageIndexReach: 1.4,
+  gunEngageThumb: 0.6,
+  gunReleaseIndexStraightness: 0.6,
 };
 
 export interface ClutchEvent {
   type: "start" | "move" | "end";
-  /** Which pose holds the clutch: "pinch" or "fist". */
+  /** Which pose holds the clutch: "pinch", "fist" or "gun". */
   gesture: Gesture;
   hand: string;
   /**
    * Gesture point, normalized to [0, 1] across the frame: between the
-   * fingertips for a pinch, the middle of the knuckles for a fist. Mirrored
+   * fingertips for a pinch, the middle of the knuckles for a fist or gun. Mirrored
    * like the preview, so x increases toward the user's right; y increases
    * downward.
    */
@@ -242,6 +266,17 @@ export interface ClutchEvent {
   dtheta: number;
   /** Multiplicative change in apparent hand size; > 1 means moving closer. */
   dscale: number;
+  /**
+   * Finger gun only (zero otherwise): change in the hand's 3D orientation,
+   * as a rotation vector (axis times angle in radians) in screen
+   * coordinates: x toward the user's right, y down, z into the screen.
+   * This is the hand's physical turn, from the user's point of view; a
+   * clockwise twist (as seen on screen, like `dtheta`) is positive about z.
+   * Turning a 3D view by it needs depth cues (perspective, axes) to read
+   * correctly: without them a rotating volume looks the same turning
+   * either way.
+   */
+  drotation: [number, number, number];
   /** Milliseconds, from `performance.now()`. */
   t: number;
 }
@@ -250,7 +285,7 @@ export interface ClutchVisual {
   hand: string;
   /**
    * The engaged gesture or, when idle, the one the hand looks closest to
-   * (curled fingers: fist; otherwise pinch).
+   * (curled fingers: fist, or gun with the index out; otherwise pinch).
    */
   gesture: Gesture;
   /**
@@ -283,6 +318,8 @@ interface Features {
   angle: number;
   /** log of apparent palm length. */
   logScale: number;
+  /** Smoothed hand orientation (see `handFrame`), row-major 3x3. */
+  orientation: number[];
 }
 
 /** Everything the clutch needs to know about one frame of one hand. */
@@ -293,6 +330,16 @@ interface Measures {
   reach: number;
   /** Smallest reach of the middle, ring and pinky fingers. */
   otherFingersReach: number;
+  /** Largest reach of the middle, ring and pinky fingers. */
+  otherFingersMaxReach: number;
+  /** Like `extension`, for the middle, ring and pinky fingers only. */
+  otherFingersExtension: number;
+  /** Index finger reach. */
+  indexReach: number;
+  /** Index finger straightness, in 3D. */
+  indexStraightness3d: number;
+  /** Thumb tip to the middle finger's middle joint, in palm lengths. */
+  thumbOut: number;
   /**
    * How extended the most extended finger is: above 1 when both its reach
    * and its straightness pass the fist's release thresholds.
@@ -347,6 +394,8 @@ export class HandClutch {
   private fy = new OneEuroFilter(1.5, 8);
   private fAngle = new OneEuroFilter(1.5, 0.5);
   private fScale = new OneEuroFilter(1.5, 0.5);
+  /** Smooths the two vectors that define the hand's orientation. */
+  private fOrient = Array.from({ length: 6 }, () => new OneEuroFilter(1.5, 0.5));
   /** Which gesture's point the position filters are tracking. */
   private filterGesture: Gesture | undefined;
   private rawAngle: number | undefined;
@@ -385,12 +434,16 @@ export class HandClutch {
     const speed = this.palmSpeed(lm, tMs, aspect);
     // While idle, follow whichever gesture the hand looks closest to, so the
     // filters are already settled on its point when it engages.
+    const curled =
+      m.straightness <
+      (opts.fistEngageStraightness + opts.engageStraightness) / 2;
     const gesture: Gesture =
       this.gesture ??
-      (m.straightness <
-      (opts.fistEngageStraightness + opts.engageStraightness) / 2
-        ? "fist"
-        : "pinch");
+      (!curled
+        ? "pinch"
+        : m.indexReach >= opts.gunEngageIndexReach
+          ? "gun"
+          : "fist");
     const point = gesturePoint(lm, gesture);
     const visible = this.gesture
       ? gestureVisible(lm, this.gesture)
@@ -414,6 +467,10 @@ export class HandClutch {
       const fistReady =
         m.reach < opts.fistEngageReach &&
         m.fingersStraightness < opts.fistEngageStraightness;
+      const gunReady =
+        m.indexReach >= opts.gunEngageIndexReach &&
+        m.otherFingersMaxReach <= opts.fistEngageReach &&
+        m.thumbOut >= opts.gunEngageThumb;
       const ready: Gesture | undefined =
         !m.wholeHandVisible || speed >= opts.engageMaxSpeed
           ? undefined
@@ -421,7 +478,9 @@ export class HandClutch {
             ? "pinch"
             : fistReady
               ? "fist"
-              : undefined;
+              : gunReady
+                ? "gun"
+                : undefined;
       if (ready !== this.engageGesture) {
         this.engageGesture = ready;
         this.engageSince = ready ? tMs : undefined;
@@ -431,7 +490,7 @@ export class HandClutch {
         ready !== undefined &&
         this.engageSince !== undefined &&
         tMs - this.engageSince >=
-          (ready === "fist" ? opts.fistEngageMs : opts.engageMs)
+          (ready === "pinch" ? opts.engageMs : opts.fistEngageMs)
       ) {
         this.engageGesture = undefined;
         this.engageSince = undefined;
@@ -454,8 +513,18 @@ export class HandClutch {
       const g = this.gesture!;
       const f = this.features(lm, g, point, tMs / 1000, aspect);
       this.lastPoint = point;
-      const open = g === "fist" ? m.extension : m.ratio;
-      const releaseAt = g === "fist" ? 1 : opts.releaseThreshold;
+      // How open the pose is; it releases above `releaseAt`.
+      const open =
+        g === "pinch"
+          ? m.ratio
+          : g === "fist"
+            ? m.extension
+            : Math.max(
+                m.otherFingersExtension,
+                opts.gunReleaseIndexStraightness /
+                  Math.max(m.indexStraightness3d, 1e-6)
+              );
+      const releaseAt = g === "pinch" ? opts.releaseThreshold : 1;
       if (this.state === "suspended") {
         if (!visible) {
           // Still (partly) off the edge: the pose can't be judged yet.
@@ -489,7 +558,7 @@ export class HandClutch {
         this.aboveCount = open > releaseAt ? this.aboveCount + 1 : 0;
         if (
           this.aboveCount >=
-          (g === "fist" ? opts.fistReleaseFrames : opts.releaseFrames)
+          (g === "pinch" ? opts.releaseFrames : opts.fistReleaseFrames)
         ) {
           events.push(this.event("end", f, tMs));
           this.disengage();
@@ -521,7 +590,13 @@ export class HandClutch {
             (FIST_OPEN_REACH - m.reach) /
               (FIST_OPEN_REACH - opts.fistEngageReach)
           )
-        : clamp01(
+        : shown === "gun"
+          ? clamp01(m.thumbOut / opts.gunEngageThumb) *
+            clamp01(
+              (FIST_OPEN_REACH - m.otherFingersMaxReach) /
+                (FIST_OPEN_REACH - opts.fistEngageReach)
+            )
+          : clamp01(
             (PINCH_OPEN_RATIO - m.ratio) /
               (PINCH_OPEN_RATIO - opts.engageThreshold)
           );
@@ -614,6 +689,7 @@ export class HandClutch {
     this.fy.reset();
     this.fAngle.reset();
     this.fScale.reset();
+    for (const f of this.fOrient) f.reset();
     this.rawAngle = undefined;
   }
 
@@ -643,11 +719,14 @@ export class HandClutch {
     this.rawAngle = raw;
 
     const palm2d = Math.hypot(ax, ay);
+    const [along, across] = handVectors(lm, aspect);
+    const v = [...along, ...across].map((c, i) => this.fOrient[i].filter(c, t));
     return {
       u: this.fu.filter(1 - point.x, t),
       y: this.fy.filter(point.y, t),
       angle: this.fAngle.filter(this.unwrappedAngle, t),
       logScale: this.fScale.filter(Math.log(Math.max(palm2d, 1e-6)), t),
+      orientation: orthonormalFrame(v.slice(0, 3), v.slice(3)),
     };
   }
 
@@ -667,6 +746,10 @@ export class HandClutch {
       dy: (f.y - last.y) * this.aspect,
       dtheta: f.angle - last.angle,
       dscale: Math.exp(f.logScale - last.logScale),
+      drotation:
+        this.gesture === "gun"
+          ? rotationVector(mulTranspose(f.orientation, last.orientation))
+          : [0, 0, 0],
       t: tMs,
     };
   }
@@ -692,6 +775,20 @@ function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
       Math.max(dist3(lm[WRIST], lm[MIDDLE_MCP], aspect), 1e-6),
     reach: Math.max(...reaches),
     otherFingersReach: Math.min(reaches[1], reaches[2], reaches[3]),
+    otherFingersMaxReach: Math.max(reaches[1], reaches[2], reaches[3]),
+    otherFingersExtension: Math.max(
+      ...[1, 2, 3].map((i) =>
+        Math.min(
+          reaches[i] / opts.fistReleaseReach,
+          fingers[i] / opts.fistReleaseStraightness
+        )
+      )
+    ),
+    indexReach: reaches[0],
+    indexStraightness3d: fingerStraightness3d(lm, INDEX_MCP, aspect),
+    thumbOut:
+      dist3(lm[THUMB_TIP], lm[MIDDLE_MCP + 1], aspect) /
+      Math.max(dist3(lm[WRIST], lm[MIDDLE_MCP], aspect), 1e-6),
     extension: Math.max(
       ...reaches.map((r, i) =>
         Math.min(
@@ -711,7 +808,7 @@ function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
  * index fingertips for a pinch, the middle of the four knuckles for a fist.
  */
 function gesturePoint(lm: Point[], gesture: Gesture): { x: number; y: number } {
-  const ids = gesture === "fist" ? FINGER_MCPS : [THUMB_TIP, INDEX_TIP];
+  const ids = gesture === "pinch" ? [THUMB_TIP, INDEX_TIP] : FINGER_MCPS;
   let x = 0;
   let y = 0;
   for (const i of ids) {
@@ -723,7 +820,7 @@ function gesturePoint(lm: Point[], gesture: Gesture): { x: number; y: number } {
 
 /** Whether the landmarks a gesture depends on are safely inside the frame. */
 function gestureVisible(lm: Point[], gesture: Gesture): boolean {
-  const ids = gesture === "fist" ? FIST_LANDMARKS : PINCH_LANDMARKS;
+  const ids = gesture === "pinch" ? PINCH_LANDMARKS : FIST_LANDMARKS;
   return ids.every((i) => insideMargin(lm[i]));
 }
 
@@ -959,6 +1056,81 @@ function insideMargin(p: Point): boolean {
  * image plane. 1 when straight, lower as it curls. Projection keeps a
  * straight finger straight, so this works whichever way the finger points.
  */
+/** Like `fingerStraightness`, in 3D (MediaPipe's depth estimate included). */
+function fingerStraightness3d(lm: Point[], mcp: number, aspect: number): number {
+  const d = (a: number, b: number) => dist3(lm[a], lm[b], aspect);
+  const along = d(mcp, mcp + 1) + d(mcp + 1, mcp + 2) + d(mcp + 2, mcp + 3);
+  return along > 1e-6 ? d(mcp, mcp + 3) / along : 0;
+}
+
+/**
+ * Two vectors that fix the hand's orientation, in the user's own frame: x
+ * toward the user's right, y down, z toward the screen (mirroring x and
+ * flipping MediaPipe's depth keeps the axes right-handed). "along" points
+ * out of the hand, averaging the index finger's direction with the palm's
+ * (wrist to middle knuckle), and "across" runs from the index knuckle to
+ * the pinky's. Holding a gun still, the resulting orientation jittered by
+ * about 0.4 degrees per frame before smoothing.
+ */
+function handVectors(lm: Point[], aspect: number): [number[], number[]] {
+  const s = (i: number) => [-lm[i].x, lm[i].y * aspect, -lm[i].z];
+  const sub = (a: number[], b: number[]) => a.map((v, k) => v - b[k]);
+  const unit = (v: number[]) => {
+    const n = Math.hypot(...v) || 1;
+    return v.map((c) => c / n);
+  };
+  const index = unit(sub(s(INDEX_TIP), s(INDEX_MCP)));
+  const palm = unit(sub(s(MIDDLE_MCP), s(WRIST)));
+  return [
+    unit(index.map((c, k) => c + palm[k])),
+    sub(s(PINKY_MCP), s(INDEX_MCP)),
+  ];
+}
+
+/**
+ * Rotation matrix (row-major 3x3) whose columns are `along`, `across` made
+ * perpendicular to it, and their cross product.
+ */
+function orthonormalFrame(along: number[], across: number[]): number[] {
+  const unit = (v: number[]) => {
+    const n = Math.hypot(...v) || 1;
+    return v.map((c) => c / n);
+  };
+  const e1 = unit(along);
+  const dot = across.reduce((s, c, k) => s + c * e1[k], 0);
+  const e2 = unit(across.map((c, k) => c - dot * e1[k]));
+  const e3 = [
+    e1[1] * e2[2] - e1[2] * e2[1],
+    e1[2] * e2[0] - e1[0] * e2[2],
+    e1[0] * e2[1] - e1[1] * e2[0],
+  ];
+  return [0, 1, 2].flatMap((r) => [e1[r], e2[r], e3[r]]);
+}
+
+/** a * b^T, for row-major 3x3 matrices. */
+function mulTranspose(a: number[], b: number[]): number[] {
+  const out: number[] = [];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) sum += a[r * 3 + k] * b[c * 3 + k];
+      out.push(sum);
+    }
+  }
+  return out;
+}
+
+/** Rotation vector (axis times angle) of a row-major 3x3 rotation matrix. */
+export function rotationVector(m: number[]): [number, number, number] {
+  const cos = Math.min(1, Math.max(-1, (m[0] + m[4] + m[8] - 1) / 2));
+  const angle = Math.acos(cos);
+  const w = [m[7] - m[5], m[2] - m[6], m[3] - m[1]];
+  const sin = Math.sin(angle);
+  // Small angles: w / 2 is accurate (sin ~ angle).
+  const k = sin > 1e-6 ? angle / (2 * sin) : 0.5;
+  return [w[0] * k, w[1] * k, w[2] * k];
+}
+
 function fingerStraightness(lm: Point[], mcp: number, aspect: number): number {
   const p = (i: number) => ({ x: lm[i].x, y: lm[i].y * aspect });
   const d = (a: number, b: number) =>

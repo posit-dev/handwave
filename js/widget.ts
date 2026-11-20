@@ -360,8 +360,8 @@ const CLUTCH_COLORS = {
 
 /**
  * Draws clutch feedback in raw landmark coordinates (the caller has already
- * mirrored the context), at the pinch point (a circle) or a fist's knuckles
- * (a larger rounded square). Idle: a ring that fills as the fingers close.
+ * mirrored the context), at the pinch point (a circle), or the knuckles of a
+ * fist (a larger rounded square) or finger gun (a diamond). Idle: a ring that fills as the fingers close.
  * Engaged: a solid marker with a tether back to where the gesture started.
  * Frozen (loosening, or first frame back in view): an amber outline.
  * Suspended (hand gone, or the gesture's fingers at the edge): a dashed
@@ -373,8 +373,7 @@ function drawClutch(
   width: number,
   height: number
 ) {
-  const fist = visual.gesture === "fist";
-  const radius = fist ? 16 : 12;
+  const radius = visual.gesture === "pinch" ? 12 : 16;
   let x = visual.point.x * width;
   let y = visual.point.y * height;
   if (visual.state === "suspended") {
@@ -390,8 +389,14 @@ function drawClutch(
 
   const marker = () => {
     ctx.beginPath();
-    if (fist) {
+    if (visual.gesture === "fist") {
       ctx.roundRect(x - radius, y - radius, 2 * radius, 2 * radius, 5);
+    } else if (visual.gesture === "gun") {
+      ctx.moveTo(x, y - radius);
+      ctx.lineTo(x + radius, y);
+      ctx.lineTo(x, y + radius);
+      ctx.lineTo(x - radius, y);
+      ctx.closePath();
     } else {
       ctx.arc(x, y, radius, 0, 2 * Math.PI);
     }
