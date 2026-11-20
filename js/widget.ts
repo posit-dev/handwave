@@ -1,6 +1,30 @@
-import cameraUtils from "https://esm.sh/@mediapipe/camera_utils@0.3/camera_utils.js";
-import drawingUtils from "https://esm.sh/@mediapipe/drawing_utils@0.3/drawing_utils.js";
-import handslib from "https://esm.sh/@mediapipe/hands@0.4/hands.js";
+// Type-only: the MediaPipe scripts themselves are loaded at runtime (see
+// assets.ts) and expose these APIs as globals on `window`.
+import type * as CameraUtils from "@mediapipe/camera_utils";
+import type * as DrawingUtils from "@mediapipe/drawing_utils";
+import type * as Hands from "@mediapipe/hands";
+
+import { AssetModel, loadHandsAssets, loadScript } from "./assets";
+import {
+  ClapEvent,
+  ClutchOptions,
+  ClutchVisual,
+  defaultClutchOptions,
+  GestureTracker,
+  isWholeHand,
+  ReelVisual,
+} from "./gestures";
+
+type MediaPipe = typeof CameraUtils & typeof DrawingUtils & typeof Hands;
+
+async function loadMediaPipe(model: AssetModel): Promise<MediaPipe> {
+  await Promise.all(
+    ["hands.js", "camera_utils.js", "drawing_utils.js"].map((name) =>
+      loadScript(model, name)
+    )
+  );
+  return window as unknown as MediaPipe;
+}
 
 import "./widget.css";
 
@@ -11,7 +35,7 @@ interface Point {
 }
 
 /* Specifies attributes defined with traitlets in ../src/handwave/__init__.py */
-interface WidgetModel {
+interface WidgetModel extends AssetModel {
   get(key: "frame_of_reference"): "image" | "world";
   get(key: "max_num_hands"): number;
   get(key: "model_complexity"): number;
@@ -24,10 +48,13 @@ interface WidgetModel {
   get(key: "hands_data"): any;
   get(key: "is_tracking"): boolean;
   get(key: "camera_active"): boolean;
+  get(key: "pinch_engage_threshold"): number;
+  get(key: "pinch_release_threshold"): number;
+  get(key: "clutched_hands"): string[];
 
   set(key: string, value: any): void;
   save_changes(): void;
-  on(event: string, callback: () => void): void;
+  on(event: string, callback: (...args: any[]) => void): void;
 }
 
 /**
@@ -70,7 +97,7 @@ interface HandTrackResults {
     label: "Left" | "Right";
     score: number;
   }>;
-  image: HTMLImageElement;
+  image: CanvasImageSource;
 }
 
 function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
@@ -96,7 +123,115 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
   let canvasCtx = canvasEl.getContext("2d")!;
 
-  function onResults(results: HandTrackResults) {
+  function clutchOptions(): ClutchOptions {
+    return {
+      ...defaultClutchOptions,
+      engageThreshold: model.get("pinch_engage_threshold"),
+      releaseThreshold: model.get("pinch_release_threshold"),
+    };
+  }
+  const tracker = new GestureTracker(
+    clutchOptions(),
+    model.get("max_num_hands")
+  );
+  const updateClutchOptions = () => {
+    tracker.opts = clutchOptions();
+  };
+  model.on("change:pinch_engage_threshold", updateClutchOptions);
+  model.on("change:pinch_release_threshold", updateClutchOptions);
+  model.on("change:max_num_hands", () => {
+    tracker.maxHands = model.get("max_num_hands");
+  });
+
+  /** The latest clap, while its flash is still showing on the preview. */
+  let lastClap: ClapEvent | undefined;
+  /** Whether `lastClap` was the first of a double clap (a smaller flash). */
+  let lastClapFirst = false;
+  /** Reeling feedback for the current frame, if the hands are in position. */
+  let reel: ReelVisual | undefined;
+  /** The latest reel step, for its flash on the preview. */
+  let lastReel: { t: number; direction: number } | undefined;
+
+  /** Whether malformed hands from MediaPipe have been logged already. */
+  let loggedMalformedHand = false;
+
+  /**
+   * `results` without any malformed hands. MediaPipe sometimes reports a
+   * hand with no landmarks (at times on every frame for a while); reading
+   * its points threw on every frame.
+   */
+  function wholeHands(results: HandTrackResults): HandTrackResults {
+    const image = results.multiHandLandmarks ?? [];
+    const world = results.multiHandWorldLandmarks;
+    const keep = image.map(
+      (lm, i) => isWholeHand(lm) && (world?.[i] === undefined || isWholeHand(world[i]))
+    );
+    if (keep.every(Boolean)) return results;
+    if (!loggedMalformedHand) {
+      loggedMalformedHand = true;
+      console.warn(
+        "handwave: skipping malformed hands from MediaPipe (logged once)",
+        {
+          landmarks: image.map((lm) => lm?.length),
+          worldLandmarks: world?.map((lm) => lm?.length),
+          handedness: JSON.stringify(results.multiHandedness),
+        },
+        JSON.stringify(image)?.slice(0, 2000)
+      );
+    }
+    const kept = <T>(xs: T[] | undefined) => xs?.filter((_, i) => keep[i]);
+    return {
+      ...results,
+      multiHandLandmarks: kept(results.multiHandLandmarks),
+      multiHandWorldLandmarks: kept(results.multiHandWorldLandmarks),
+      multiHandedness: kept(results.multiHandedness),
+    };
+  }
+
+  /** Runs gesture recognition; returns visuals to draw on the preview. */
+  function updateGestures(results: HandTrackResults): ClutchVisual[] {
+    const hands = (results.multiHandLandmarks ?? []).map((landmarks, i) => ({
+      label: flipHand(results.multiHandedness?.[i]?.label ?? "Right"),
+      landmarks,
+    }));
+    // MediaPipe normalizes landmarks by the camera frame's actual size,
+    // which can differ from the requested width/height.
+    const aspect =
+      videoEl.videoWidth > 0
+        ? videoEl.videoHeight / videoEl.videoWidth
+        : canvasEl.height / canvasEl.width;
+    const { events, visuals, claps, firstClaps, reels, reelVisual } = tracker.update(
+      hands,
+      performance.now(),
+      aspect
+    );
+    if (events.length > 0) {
+      model.send({ type: "handwave:clutch", events });
+    }
+    if (claps.length > 0) {
+      model.send({ type: "handwave:clap", events: claps });
+      lastClap = claps[claps.length - 1];
+      lastClapFirst = false;
+    } else if (firstClaps.length > 0) {
+      lastClap = firstClaps[firstClaps.length - 1];
+      lastClapFirst = true;
+    }
+    if (reels.length > 0) {
+      model.send({ type: "handwave:reel", events: reels });
+      lastReel = { t: reels[reels.length - 1].t, direction: reels[reels.length - 1].direction };
+    }
+    reel = reelVisual;
+    const engaged = tracker.engagedHands();
+    if (engaged.join(",") !== model.get("clutched_hands").join(",")) {
+      model.set("clutched_hands", engaged);
+    }
+    return visuals;
+  }
+
+  function onResults(raw: HandTrackResults) {
+    const results = wholeHands(raw);
+    const clutchVisuals = updateGestures(results);
+
     // Update model with hand data
     const frameOfReference = model.get("frame_of_reference");
     const landmarks =
@@ -127,7 +262,6 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
         }
         return handColumnar;
       });
-      console.log(columnarResults);
 
       model.set("hands_data", columnarResults);
       model.set(
@@ -171,49 +305,102 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
     // Only draw hand landmarks if debug is enabled
     for (let landmarks of results.multiHandLandmarks ?? []) {
-      drawingUtils.drawConnectors(
+      mp.drawConnectors(
         canvasCtx,
         landmarks,
-        handslib.HAND_CONNECTIONS,
+        mp.HAND_CONNECTIONS,
         {
           color: "#00FF00",
           lineWidth: 2,
         }
       );
-      drawingUtils.drawLandmarks(canvasCtx, landmarks, {
+      mp.drawLandmarks(canvasCtx, landmarks, {
         color: "#FFFFFF",
         radius: 2,
       });
     }
 
+    for (const visual of clutchVisuals) {
+      drawClutch(canvasCtx, visual, canvasEl.width, canvasEl.height);
+    }
+    if (reel) {
+      const flash =
+        lastReel && performance.now() - lastReel.t < CLAP_FLASH_MS
+          ? 1 - (performance.now() - lastReel.t) / CLAP_FLASH_MS
+          : 0;
+      drawReel(canvasCtx, reel, flash, canvasEl.width, canvasEl.height);
+    }
+    if (lastClap) {
+      const age = (performance.now() - lastClap.t) / CLAP_FLASH_MS;
+      if (age < 1) {
+        drawClap(canvasCtx, lastClap, age, lastClapFirst, canvasEl.width, canvasEl.height);
+      } else {
+        lastClap = undefined;
+      }
+    }
+
     canvasCtx.restore();
+
+    if (model.get("debug") && clutchVisuals.length > 0) {
+      debugInfo.innerHTML +=
+        "<br>" +
+        clutchVisuals
+          .map(
+            (v) =>
+              `${v.hand} pinch: <tt>${v.ratio.toFixed(2)}</tt> ` +
+              `fingers: <tt>${v.straightness.toFixed(2)}</tt> ` +
+              `reach: <tt>${v.reach.toFixed(2)}</tt> ${v.gesture} ${v.state}`
+          )
+          .join("<br>");
+    }
   }
 
-  let hands = new handslib.Hands({
-    locateFile: (file: string) => {
-      // hack to load static assets...
-      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
-    },
-  });
+  let disposed = false;
+  let mp: MediaPipe;
+  let camera: CameraUtils.Camera | undefined;
 
-  hands.setOptions({
-    maxNumHands: model.get("max_num_hands"),
-    modelComplexity: model.get("model_complexity"),
-    minDetectionConfidence: model.get("min_detection_confidence"),
-    minTrackingConfidence: model.get("min_tracking_confidence"),
-  });
+  async function start() {
+    debugInfo.style.display = "block";
+    debugInfo.textContent = "Loading hand tracking model…";
+    const [mediapipe, locateFile] = await Promise.all([
+      loadMediaPipe(model),
+      loadHandsAssets(model, model.get("model_complexity")),
+    ]);
+    mp = mediapipe;
+    debugInfo.style.display = model.get("debug") ? "block" : "none";
+    debugInfo.textContent = "";
+    if (disposed) return;
 
-  hands.onResults(onResults);
+    const hands = new mp.Hands({ locateFile });
 
-  let camera = new cameraUtils.Camera(videoEl, {
-    onFrame: () => hands.send({ image: videoEl }),
-    width: model.get("width"),
-    height: model.get("height"),
-  });
+    hands.setOptions({
+      maxNumHands: model.get("max_num_hands"),
+      modelComplexity: model.get("model_complexity") as 0 | 1,
+      minDetectionConfidence: model.get("min_detection_confidence"),
+      minTrackingConfidence: model.get("min_tracking_confidence"),
+    });
 
-  camera.start().then(() => {
+    hands.onResults(onResults);
+
+    camera = new mp.Camera(videoEl, {
+      // camera_utils only asks for the next frame once this resolves: if it
+      // rejects (an error in onResults, say), the preview and gestures
+      // freeze for good. Log it and carry on instead.
+      onFrame: () =>
+        hands.send({ image: videoEl }).catch((err) => console.error("handwave:", err)),
+      width: model.get("width"),
+      height: model.get("height"),
+    });
+
+    await camera.start();
     model.set("camera_active", true);
     model.save_changes();
+  }
+
+  start().catch((err) => {
+    console.error(err);
+    debugInfo.style.display = "block";
+    debugInfo.textContent = `Error: ${err?.message ?? err}`;
   });
 
   model.on("change:debug", () => {
@@ -230,7 +417,8 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
   });
 
   return () => {
-    camera.stop();
+    disposed = true;
+    camera?.stop();
     model.set("camera_active", false);
     model.save_changes();
   };
@@ -242,6 +430,179 @@ function pretty_coord(value: number, precision: number = 3): string {
   return `<span style="color: ${color}">${prefix}${value.toFixed(
     precision
   )}</span>`;
+}
+
+const CLUTCH_COLORS = {
+  idle: "rgba(255, 255, 255, 0.8)",
+  engaged: "#00E5FF",
+  frozen: "#FFC400",
+  suspended: "#FF9100",
+};
+
+/**
+ * Draws clutch feedback in raw landmark coordinates (the caller has already
+ * mirrored the context), at the pinch point (a circle), or the knuckles of a
+ * fist (a larger rounded square) or finger gun (a diamond). Idle: a ring that fills as the fingers close.
+ * Engaged: a solid marker with a tether back to where the gesture started.
+ * Frozen (loosening, or first frame back in view): an amber outline.
+ * Suspended (hand gone, or the gesture's fingers at the edge): a dashed
+ * orange outline where the hand was, kept inside the frame.
+ */
+function drawClutch(
+  ctx: CanvasRenderingContext2D,
+  visual: ClutchVisual,
+  width: number,
+  height: number
+) {
+  const radius = visual.gesture === "pinch" ? 12 : 16;
+  let x = visual.point.x * width;
+  let y = visual.point.y * height;
+  if (visual.state === "suspended") {
+    const inset = radius + 3;
+    x = Math.min(width - inset, Math.max(inset, x));
+    y = Math.min(height - inset, Math.max(inset, y));
+  }
+  const color = CLUTCH_COLORS[visual.state];
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+
+  const marker = () => {
+    ctx.beginPath();
+    if (visual.gesture === "fist") {
+      ctx.roundRect(x - radius, y - radius, 2 * radius, 2 * radius, 5);
+    } else if (visual.gesture === "gun") {
+      ctx.moveTo(x, y - radius);
+      ctx.lineTo(x + radius, y);
+      ctx.lineTo(x, y + radius);
+      ctx.lineTo(x - radius, y);
+      ctx.closePath();
+    } else {
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    }
+  };
+
+  if (visual.state === "suspended") {
+    ctx.setLineDash([4, 3]);
+    marker();
+    ctx.stroke();
+  } else if (visual.state === "idle") {
+    if (visual.progress > 0) {
+      ctx.beginPath();
+      ctx.arc(
+        x,
+        y,
+        radius,
+        -Math.PI / 2,
+        -Math.PI / 2 + visual.progress * 2 * Math.PI
+      );
+      ctx.stroke();
+    }
+  } else {
+    if (visual.anchor) {
+      const ax = visual.anchor.x * width;
+      const ay = visual.anchor.y * height;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(ax, ay, 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    marker();
+    if (visual.state === "engaged") {
+      ctx.globalAlpha = 0.6;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** How long a clap's flash shows on the preview. */
+const CLAP_FLASH_MS = 400;
+
+/**
+ * Draws a clap as a ring expanding and fading from where the hands met, in
+ * raw landmark coordinates (the caller has already mirrored the context).
+ * `age` runs from 0 (just clapped) to 1 (gone). The first clap of a double
+ * clap gets a smaller, thinner ring: it registered, but did nothing yet.
+ */
+function drawClap(
+  ctx: CanvasRenderingContext2D,
+  clap: ClapEvent,
+  age: number,
+  first: boolean,
+  width: number,
+  height: number
+) {
+  ctx.save();
+  ctx.globalAlpha = 1 - age;
+  ctx.lineWidth = first ? 2 : 4;
+  ctx.strokeStyle = CLUTCH_COLORS.engaged;
+  ctx.beginPath();
+  ctx.arc(
+    (1 - clap.x) * width,
+    clap.y * height,
+    first ? 10 + 15 * age : 15 + 45 * age,
+    0,
+    2 * Math.PI
+  );
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Draws reeling feedback around the reeling hand, in raw landmark
+ * coordinates (the caller has already mirrored the context): a faint ring,
+ * and an arc that fills toward the next step, clockwise (as the user sees
+ * it) for forward. `flash` (0 to 1) fills the ring just after a step.
+ */
+function drawReel(
+  ctx: CanvasRenderingContext2D,
+  visual: ReelVisual,
+  flash: number,
+  width: number,
+  height: number
+) {
+  const x = visual.point.x * width;
+  const y = visual.point.y * height;
+  const radius = 26;
+  ctx.save();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = CLUTCH_COLORS.idle;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, 2 * Math.PI);
+  ctx.stroke();
+  ctx.strokeStyle = CLUTCH_COLORS.engaged;
+  if (flash > 0) {
+    ctx.globalAlpha = flash;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+  if (visual.progress !== 0) {
+    // The context is mirrored, so a counterclockwise arc here is clockwise
+    // on screen.
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(
+      x,
+      y,
+      radius,
+      -Math.PI / 2,
+      -Math.PI / 2 - visual.progress * 2 * Math.PI,
+      visual.progress > 0
+    );
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function flipHand(label: "Left" | "Right"): "Right" | "Left" {

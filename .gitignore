@@ -8,3 +8,6 @@ __pycache__
 .ipynb_checkpoints
 
 src/handwave/static
+
+# marimo
+__marimo__

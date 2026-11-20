@@ -2,12 +2,15 @@
 	"scripts": {
 		"dev": "npm run build -- --sourcemap=inline --watch",
 		"build": "esbuild js/widget.ts --minify --format=esm --bundle --outdir=src/handwave/static",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "node --test tests/*.test.ts"
 	},
-	"dependencies": {},
 	"devDependencies": {
-		"@anywidget/types": "^0.2.0",
-		"typescript": "^5.8.3",
-		"esbuild": "^0.25.4"
+		"@anywidget/types": "^0.4.0",
+		"@mediapipe/camera_utils": "^0.3.1675466862",
+		"@mediapipe/drawing_utils": "^0.3.1675466124",
+		"@mediapipe/hands": "^0.4.1675469240",
+		"esbuild": "^0.28.2",
+		"typescript": "~5.9.3"
 	}
 }
