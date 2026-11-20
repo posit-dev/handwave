@@ -1,5 +1,7 @@
+import dataclasses
 import importlib.metadata
 import pathlib
+import typing
 
 import anywidget
 import pandas as pd
@@ -7,7 +9,7 @@ import traitlets
 
 from ._assets import AssetUnavailableError, cache_dir, download_assets, get_asset
 
-__all__ = ["HandwaveWidget", "download_assets", "cache_dir"]
+__all__ = ["HandwaveWidget", "ClutchEvent", "download_assets", "cache_dir"]
 
 try:
     __version__ = importlib.metadata.version("handwave")
@@ -15,6 +17,44 @@ except importlib.metadata.PackageNotFoundError:
     __version__ = "unknown"
 
 bundler_output_dir = pathlib.Path(__file__).parent / "static"
+
+
+@dataclasses.dataclass(frozen=True)
+class ClutchEvent:
+    """A pinch clutch event, delivered to callbacks registered with
+    `HandwaveWidget.on_clutch()`.
+
+    A gesture is a "start" event, any number of "move" events, then an "end"
+    event. Use the relative fields (`dx`, `dy`, `dtheta`, `dscale`) to drive
+    whatever you're manipulating; releasing and re-pinching then lets you
+    reposition your hand without moving the data (like lifting a mouse).
+    """
+
+    type: typing.Literal["start", "move", "end"]
+    """Phase of the gesture."""
+    gesture: typing.Literal["pinch"]
+    """Which clutch gesture produced the event."""
+    hand: typing.Literal["Left", "Right"]
+    """Which hand (subject to the usual handedness caveats)."""
+    x: float
+    """Pinch point, 0 (user's left) to 1 (user's right), mirrored like the preview."""
+    y: float
+    """Pinch point, 0 (top) to 1 (bottom)."""
+    dx: float
+    """Horizontal movement since the last event, in frame widths."""
+    dy: float
+    """Vertical movement since the last event, in frame widths (down is positive)."""
+    dtheta: float
+    """Change in hand roll since the last event, in radians (clockwise is positive)."""
+    dscale: float
+    """Multiplicative change in apparent hand size (> 1 means moving toward the camera)."""
+    t: float
+    """Browser timestamp, in milliseconds."""
+
+
+ClutchCallback = typing.Callable[[ClutchEvent], typing.Any]
+
+_CLUTCH_EVENT_FIELDS = {field.name for field in dataclasses.fields(ClutchEvent)}
 
 
 class HandwaveWidget(anywidget.AnyWidget):
@@ -28,6 +68,8 @@ class HandwaveWidget(anywidget.AnyWidget):
     debug = traitlets.Bool(False).tag(sync=True)
     width = traitlets.Int(640).tag(sync=True)
     height = traitlets.Int(480).tag(sync=True)
+    pinch_engage_threshold = traitlets.Float(0.25).tag(sync=True)
+    pinch_release_threshold = traitlets.Float(0.4).tag(sync=True)
 
     # state
     hands_data = traitlets.List(None, allow_none=True).tag(sync=True)
@@ -37,18 +79,63 @@ class HandwaveWidget(anywidget.AnyWidget):
 
     is_tracking = traitlets.Bool(False).tag(sync=True)
     camera_active = traitlets.Bool(False).tag(sync=True)
+    clutched_hands = traitlets.List(traitlets.Unicode(), []).tag(sync=True)
 
     _esm = bundler_output_dir / "widget.js"
     _css = bundler_output_dir / "widget.css"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._clutch_callbacks: list[ClutchCallback] = []
         self.on_msg(self._on_custom_msg)
 
+    def on_clutch(self, callback: ClutchCallback, remove: bool = False):
+        """Register a callback for pinch clutch events.
+
+        The callback receives a `ClutchEvent`. Can be used as a decorator:
+
+            @widget.on_clutch
+            def handle(event):
+                if event.type == "move":
+                    ...
+
+        Pass `remove=True` to unregister a callback.
+        """
+        if remove:
+            self._clutch_callbacks.remove(callback)
+        else:
+            self._clutch_callbacks.append(callback)
+        return callback
+
     def _on_custom_msg(self, _widget, content, _buffers):
-        """Serve MediaPipe files to the browser from the local cache."""
-        if not isinstance(content, dict) or content.get("type") != "handwave:get_asset":
+        if not isinstance(content, dict):
             return
+        if content.get("type") == "handwave:clutch":
+            self._dispatch_clutch(content.get("events", []))
+        elif content.get("type") == "handwave:get_asset":
+            self._serve_asset(content)
+
+    def _dispatch_clutch(self, events):
+        # Deliver every event to every callback even if one raises, so a
+        # failing callback can't swallow another hand's "end" event; then
+        # re-raise the first error so it still shows up.
+        errors = []
+        for fields in events:
+            # Ignore fields this version doesn't know about, in case the
+            # browser is running a different build of the widget.
+            event = ClutchEvent(
+                **{k: v for k, v in fields.items() if k in _CLUTCH_EVENT_FIELDS}
+            )
+            for callback in list(self._clutch_callbacks):
+                try:
+                    callback(event)
+                except Exception as e:
+                    errors.append(e)
+        if errors:
+            raise errors[0]
+
+    def _serve_asset(self, content):
+        """Serve MediaPipe files to the browser from the local cache."""
         name = content.get("name")
         reply = {"type": "handwave:asset", "name": name}
         try:

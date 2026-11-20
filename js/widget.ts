@@ -5,6 +5,12 @@ import type * as DrawingUtils from "@mediapipe/drawing_utils";
 import type * as Hands from "@mediapipe/hands";
 
 import { AssetModel, loadHandsAssets, loadScript } from "./assets";
+import {
+  ClutchOptions,
+  ClutchVisual,
+  defaultClutchOptions,
+  GestureTracker,
+} from "./gestures";
 
 type MediaPipe = typeof CameraUtils & typeof DrawingUtils & typeof Hands;
 
@@ -39,6 +45,9 @@ interface WidgetModel extends AssetModel {
   get(key: "hands_data"): any;
   get(key: "is_tracking"): boolean;
   get(key: "camera_active"): boolean;
+  get(key: "pinch_engage_threshold"): number;
+  get(key: "pinch_release_threshold"): number;
+  get(key: "clutched_hands"): string[];
 
   set(key: string, value: any): void;
   save_changes(): void;
@@ -111,7 +120,56 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
   let canvasCtx = canvasEl.getContext("2d")!;
 
+  function clutchOptions(): ClutchOptions {
+    return {
+      ...defaultClutchOptions,
+      engageThreshold: model.get("pinch_engage_threshold"),
+      releaseThreshold: model.get("pinch_release_threshold"),
+    };
+  }
+  const tracker = new GestureTracker(
+    clutchOptions(),
+    model.get("max_num_hands")
+  );
+  const updateClutchOptions = () => {
+    tracker.opts = clutchOptions();
+  };
+  model.on("change:pinch_engage_threshold", updateClutchOptions);
+  model.on("change:pinch_release_threshold", updateClutchOptions);
+  model.on("change:max_num_hands", () => {
+    tracker.maxHands = model.get("max_num_hands");
+  });
+
+  /** Runs gesture recognition; returns visuals to draw on the preview. */
+  function updateGestures(results: HandTrackResults): ClutchVisual[] {
+    const hands = (results.multiHandLandmarks ?? []).map((landmarks, i) => ({
+      label: flipHand(results.multiHandedness?.[i]?.label ?? "Right"),
+      landmarks,
+    }));
+    // MediaPipe normalizes landmarks by the camera frame's actual size,
+    // which can differ from the requested width/height.
+    const aspect =
+      videoEl.videoWidth > 0
+        ? videoEl.videoHeight / videoEl.videoWidth
+        : canvasEl.height / canvasEl.width;
+    const { events, visuals } = tracker.update(
+      hands,
+      performance.now(),
+      aspect
+    );
+    if (events.length > 0) {
+      model.send({ type: "handwave:clutch", events });
+    }
+    const engaged = tracker.engagedHands();
+    if (engaged.join(",") !== model.get("clutched_hands").join(",")) {
+      model.set("clutched_hands", engaged);
+    }
+    return visuals;
+  }
+
   function onResults(results: HandTrackResults) {
+    const clutchVisuals = updateGestures(results);
+
     // Update model with hand data
     const frameOfReference = model.get("frame_of_reference");
     const landmarks =
@@ -142,7 +200,6 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
         }
         return handColumnar;
       });
-      console.log(columnarResults);
 
       model.set("hands_data", columnarResults);
       model.set(
@@ -201,7 +258,23 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       });
     }
 
+    for (const visual of clutchVisuals) {
+      drawClutch(canvasCtx, visual, canvasEl.width, canvasEl.height);
+    }
+
     canvasCtx.restore();
+
+    if (model.get("debug") && clutchVisuals.length > 0) {
+      debugInfo.innerHTML +=
+        "<br>" +
+        clutchVisuals
+          .map(
+            (v) =>
+              `${v.hand} pinch: <tt>${v.ratio.toFixed(2)}</tt> ` +
+              `fingers: <tt>${v.straightness.toFixed(2)}</tt> ${v.state}`
+          )
+          .join("<br>");
+    }
   }
 
   let disposed = false;
@@ -275,6 +348,84 @@ function pretty_coord(value: number, precision: number = 3): string {
   return `<span style="color: ${color}">${prefix}${value.toFixed(
     precision
   )}</span>`;
+}
+
+const CLUTCH_COLORS = {
+  idle: "rgba(255, 255, 255, 0.8)",
+  engaged: "#00E5FF",
+  frozen: "#FFC400",
+  suspended: "#FF9100",
+};
+
+/**
+ * Draws clutch feedback in raw landmark coordinates (the caller has already
+ * mirrored the context). Idle: a ring that fills as the fingers close.
+ * Engaged: a solid dot with a tether back to where the pinch started.
+ * Frozen (pinch loosening, or first frame back in view): an amber ring.
+ * Suspended (hand gone, or a fingertip at the edge): a dashed orange ring
+ * where the hand was, kept inside the frame.
+ */
+function drawClutch(
+  ctx: CanvasRenderingContext2D,
+  visual: ClutchVisual,
+  width: number,
+  height: number
+) {
+  const radius = 12;
+  let x = visual.point.x * width;
+  let y = visual.point.y * height;
+  if (visual.state === "suspended") {
+    const inset = radius + 3;
+    x = Math.min(width - inset, Math.max(inset, x));
+    y = Math.min(height - inset, Math.max(inset, y));
+  }
+  const color = CLUTCH_COLORS[visual.state];
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+
+  if (visual.state === "suspended") {
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    ctx.stroke();
+  } else if (visual.state === "idle") {
+    if (visual.progress > 0) {
+      ctx.beginPath();
+      ctx.arc(
+        x,
+        y,
+        radius,
+        -Math.PI / 2,
+        -Math.PI / 2 + visual.progress * 2 * Math.PI
+      );
+      ctx.stroke();
+    }
+  } else {
+    if (visual.anchor) {
+      const ax = visual.anchor.x * width;
+      const ay = visual.anchor.y * height;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(ax, ay, 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    if (visual.state === "engaged") {
+      ctx.globalAlpha = 0.6;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function flipHand(label: "Left" | "Right"): "Right" | "Left" {

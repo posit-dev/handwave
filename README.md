@@ -37,6 +37,39 @@ This will show a widget that uses your webcam to detect hand gestures.
 - You can use the `widget.hand` property to retrieve just the first detected hand and its landmarks, as a Pandas data frame (or `None` if no hand is detected).
 - Each hand also has `.attrs["handedness"]` (either "Left" or "Right") and `.attrs["handedness_score"]` properties. Be aware that Left and Right may be swapped depending on whether your camera returns mirrored video or not.
 
+## Pinch clutch
+
+Pinching your thumb and index finger together "clutches" the widget: while you hold the pinch, your hand movements are reported as events, and when you let go they stop. This is how you tell handwave "I mean this" versus "I'm just moving my hand." Release, move your hand somewhere comfortable, and pinch again to keep going, like lifting a mouse off the pad.
+
+Starting a pinch takes a deliberate pose, so a relaxed hand can't start one by accident: make an "OK" sign, with your thumb and index fingertips touching, your other three fingers extended, your whole hand in view, and your hand held still for a moment (about 0.1 seconds). Once it's engaged, only the fingertips need to stay together; the other fingers can relax.
+
+```python
+widget = HandwaveWidget()
+
+@widget.on_clutch
+def on_clutch(event):
+    if event.type == "move":
+        print(event.hand, event.dx, event.dy, event.dtheta, event.dscale)
+```
+
+Each pinch produces a `"start"` event, then `"move"` events (one per video frame), then an `"end"` event. Each event is a `handwave.ClutchEvent` with:
+
+- **hand**: `"Left"` or `"Right"`. Each hand has its own clutch, so two-handed gestures work with `max_num_hands=2`.
+- **x**, **y**: The pinch point, from 0 to 1 across the frame. x is mirrored like the preview, so it increases toward your right.
+- **dx**, **dy**: Movement since the previous event, in frame widths (so horizontal and vertical movement are scaled the same). Down is positive.
+- **dtheta**: Change in hand roll since the previous event, in radians. Twist your hand like a dial; clockwise is positive.
+- **dscale**: Change in the apparent size of your hand, as a ratio. Greater than 1 means your hand moved toward the camera.
+
+Use the relative values (`dx`, `dy`, `dtheta`, `dscale`) rather than absolute positions, so that releasing and re-pinching doesn't make anything jump. Movement is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/).
+
+The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment.
+
+If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump; bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch.
+
+`widget.clutched_hands` lists the hands that are currently pinching (including clutches on hold), and can be observed like any other trait.
+
+If pinches engage too easily or not easily enough, set `debug=True` to see the live pinch ratio (fingertip distance divided by palm length) and how straight your other fingers are (from 0 to 1; engaging needs 0.85 or more), and adjust `pinch_engage_threshold` and `pinch_release_threshold`. Keep the release threshold comfortably above the engage threshold.
+
 ## Offline use
 
 handwave uses Google's [MediaPipe Hands](https://github.com/google-ai-edge/mediapipe) model, which isn't bundled with the package. The first time the widget runs, it downloads the MediaPipe files it needs (about 16 MB) from the jsDelivr CDN and caches them locally. After that, the widget works without an internet connection.
@@ -64,6 +97,8 @@ The widget takes the following configuration options in its constructor:
 - **debug**: Whether to show debug information in the widget (default is False).
 - **width**: Width of the video stream in pixels (default is 320).
 - **height**: Height of the video stream in pixels (default is 240).
+- **pinch_engage_threshold**: Pinch ratio below which a pinch clutch engages (default is 0.25). See [Pinch clutch](#pinch-clutch).
+- **pinch_release_threshold**: Pinch ratio above which a pinch clutch releases (default is 0.4).
 
 ## Development
 

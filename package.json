@@ -2,7 +2,8 @@
 	"scripts": {
 		"dev": "npm run build -- --sourcemap=inline --watch",
 		"build": "esbuild js/widget.ts --minify --format=esm --bundle --outdir=src/handwave/static",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "node --test tests/*.test.ts"
 	},
 	"dependencies": {},
 	"devDependencies": {
