@@ -35,6 +35,11 @@ examples = [
     "shinywidgets",
 ]
 
+[tool.uv]
+# Only lock releases that have been out for a week, to steer clear of
+# broken or compromised fresh uploads.
+exclude-newer = "1 week"
+
 
 [tool.hatch.build]
 only-packages = true

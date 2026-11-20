@@ -27,7 +27,7 @@ export interface AssetModel {
   send(content: any, callbacks?: any, buffers?: ArrayBuffer[]): void;
   on(
     event: "msg:custom",
-    callback: (msg: CustomMessage, buffers: DataView[]) => void
+    callback: (msg: CustomMessage, buffers: DataView<ArrayBuffer>[]) => void
   ): void;
   off(event: "msg:custom", callback?: Function): void;
 }
@@ -42,7 +42,7 @@ function mimeType(name: string): string {
 
 function requestAsset(model: AssetModel, name: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const handler = (msg: CustomMessage, buffers: DataView[]) => {
+    const handler = (msg: CustomMessage, buffers: DataView<ArrayBuffer>[]) => {
       if (msg?.type !== RESPONSE || msg.name !== name) return;
       model.off("msg:custom", handler);
       if (msg.error || !buffers?.length) {
