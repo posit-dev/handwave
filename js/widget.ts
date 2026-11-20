@@ -152,8 +152,41 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
   /** The latest reel step, for its flash on the preview. */
   let lastReel: { t: number; direction: number } | undefined;
 
-  /** Whether a malformed hand from MediaPipe has been logged already. */
+  /** Whether malformed hands from MediaPipe have been logged already. */
   let loggedMalformedHand = false;
+
+  /**
+   * `results` without any malformed hands. MediaPipe sometimes reports a
+   * hand with no landmarks (at times on every frame for a while); reading
+   * its points threw on every frame.
+   */
+  function wholeHands(results: HandTrackResults): HandTrackResults {
+    const image = results.multiHandLandmarks ?? [];
+    const world = results.multiHandWorldLandmarks;
+    const keep = image.map(
+      (lm, i) => isWholeHand(lm) && (world?.[i] === undefined || isWholeHand(world[i]))
+    );
+    if (keep.every(Boolean)) return results;
+    if (!loggedMalformedHand) {
+      loggedMalformedHand = true;
+      console.warn(
+        "handwave: skipping malformed hands from MediaPipe (logged once)",
+        {
+          landmarks: image.map((lm) => lm?.length),
+          worldLandmarks: world?.map((lm) => lm?.length),
+          handedness: JSON.stringify(results.multiHandedness),
+        },
+        JSON.stringify(image)?.slice(0, 2000)
+      );
+    }
+    const kept = <T>(xs: T[] | undefined) => xs?.filter((_, i) => keep[i]);
+    return {
+      ...results,
+      multiHandLandmarks: kept(results.multiHandLandmarks),
+      multiHandWorldLandmarks: kept(results.multiHandWorldLandmarks),
+      multiHandedness: kept(results.multiHandedness),
+    };
+  }
 
   /** Runs gesture recognition; returns visuals to draw on the preview. */
   function updateGestures(results: HandTrackResults): ClutchVisual[] {
@@ -161,15 +194,6 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       label: flipHand(results.multiHandedness?.[i]?.label ?? "Right"),
       landmarks,
     }));
-    if (!loggedMalformedHand && !hands.every((h) => isWholeHand(h.landmarks))) {
-      // The tracker skips these; log one, to see what MediaPipe sent.
-      loggedMalformedHand = true;
-      console.warn(
-        "handwave: skipping a malformed hand from MediaPipe",
-        hands.map((h) => h.landmarks?.length),
-        JSON.stringify(results.multiHandLandmarks)?.slice(0, 2000)
-      );
-    }
     // MediaPipe normalizes landmarks by the camera frame's actual size,
     // which can differ from the requested width/height.
     const aspect =
@@ -204,7 +228,8 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     return visuals;
   }
 
-  function onResults(results: HandTrackResults) {
+  function onResults(raw: HandTrackResults) {
+    const results = wholeHands(raw);
     const clutchVisuals = updateGestures(results);
 
     // Update model with hand data
