@@ -6,6 +6,7 @@ import type * as Hands from "@mediapipe/hands";
 
 import { AssetModel, loadHandsAssets, loadScript } from "./assets";
 import {
+  ClapEvent,
   ClutchOptions,
   ClutchVisual,
   defaultClutchOptions,
@@ -140,6 +141,9 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
     tracker.maxHands = model.get("max_num_hands");
   });
 
+  /** The latest clap, while its flash is still showing on the preview. */
+  let lastClap: ClapEvent | undefined;
+
   /** Runs gesture recognition; returns visuals to draw on the preview. */
   function updateGestures(results: HandTrackResults): ClutchVisual[] {
     const hands = (results.multiHandLandmarks ?? []).map((landmarks, i) => ({
@@ -152,13 +156,17 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       videoEl.videoWidth > 0
         ? videoEl.videoHeight / videoEl.videoWidth
         : canvasEl.height / canvasEl.width;
-    const { events, visuals } = tracker.update(
+    const { events, visuals, claps } = tracker.update(
       hands,
       performance.now(),
       aspect
     );
     if (events.length > 0) {
       model.send({ type: "handwave:clutch", events });
+    }
+    if (claps.length > 0) {
+      model.send({ type: "handwave:clap", events: claps });
+      lastClap = claps[claps.length - 1];
     }
     const engaged = tracker.engagedHands();
     if (engaged.join(",") !== model.get("clutched_hands").join(",")) {
@@ -260,6 +268,14 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
     for (const visual of clutchVisuals) {
       drawClutch(canvasCtx, visual, canvasEl.width, canvasEl.height);
+    }
+    if (lastClap) {
+      const age = (performance.now() - lastClap.t) / CLAP_FLASH_MS;
+      if (age < 1) {
+        drawClap(canvasCtx, lastClap, age, canvasEl.width, canvasEl.height);
+      } else {
+        lastClap = undefined;
+      }
     }
 
     canvasCtx.restore();
@@ -440,6 +456,31 @@ function drawClutch(
     }
     ctx.stroke();
   }
+  ctx.restore();
+}
+
+/** How long a clap's flash shows on the preview. */
+const CLAP_FLASH_MS = 400;
+
+/**
+ * Draws a clap as a ring expanding and fading from where the hands met, in
+ * raw landmark coordinates (the caller has already mirrored the context).
+ * `age` runs from 0 (just clapped) to 1 (gone).
+ */
+function drawClap(
+  ctx: CanvasRenderingContext2D,
+  clap: ClapEvent,
+  age: number,
+  width: number,
+  height: number
+) {
+  ctx.save();
+  ctx.globalAlpha = 1 - age;
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = CLUTCH_COLORS.engaged;
+  ctx.beginPath();
+  ctx.arc((1 - clap.x) * width, clap.y * height, 15 + 45 * age, 0, 2 * Math.PI);
+  ctx.stroke();
   ctx.restore();
 }
 

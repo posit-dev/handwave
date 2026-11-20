@@ -89,6 +89,20 @@ If your hand slips out of the frame mid-pinch, the clutch goes on hold rather th
 
 If pinches engage too easily or not easily enough, set `debug=True` to see the live pinch ratio (fingertip distance divided by palm length) and how straight your other fingers are (from 0 to 1; engaging needs 0.85 or more), and adjust `pinch_engage_threshold` and `pinch_release_threshold`. Keep the release threshold comfortably above the engage threshold. The debug display also shows a fist's "reach": how far your farthest fingertip is from your wrist, relative to its knuckle, in 3D (so it still works with your fist pointed at the camera). A fist engages below 1.3; an open hand is around 2. An engaged fist releases once a finger is extended (reach above 1.6 and nearly straight) for 3 frames in a row.
 
+## Clap
+
+With `max_num_hands=2`, clapping sends a `ClapEvent` to callbacks registered with `on_clap()`, for one-off actions like resetting a view:
+
+```python
+@widget.on_clap
+def on_clap(event):
+    reset_view()
+```
+
+`event.x` and `event.y` are where your hands met, like a clutch event's. The preview shows a cyan ring expanding from that spot.
+
+A clap is two hands, at least two hand lengths apart, becoming one (MediaPipe sees clasped hands as a single hand) somewhere between where they were, within 0.3 seconds. Bringing your hands together slowly doesn't count, and neither does one hand leaving the frame. Claps are ignored while either hand is clutching.
+
 ## Offline use
 
 handwave uses Google's [MediaPipe Hands](https://github.com/google-ai-edge/mediapipe) model, which isn't bundled with the package. The first time the widget runs, it downloads the MediaPipe files it needs (about 16 MB) from the jsDelivr CDN and caches them locally. After that, the widget works without an internet connection.

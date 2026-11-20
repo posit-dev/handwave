@@ -156,6 +156,11 @@ def _(math, np, viewer):
             viewer.scene.camera.set_view_direction(view, rotate_about(up, view, -turn))
 
 
+    def reset_view(event):
+        """Clap: back to the starting view."""
+        viewer.reset_view()
+
+
     def drive_napari(event):
         if event.gesture == "fist":
             grab(event)
@@ -164,13 +169,14 @@ def _(math, np, viewer):
         else:
             pinch(event)
 
-    return (drive_napari,)
+    return drive_napari, reset_view
 
 
 @app.cell
-def _(HandwaveWidget, drive_napari, mo):
+def _(HandwaveWidget, drive_napari, mo, reset_view):
     handwave_widget = HandwaveWidget(max_num_hands=2, width=320, height=240, debug=True)
     handwave_widget.on_clutch(drive_napari)
+    handwave_widget.on_clap(reset_view)
     widget = mo.ui.anywidget(handwave_widget)
     mo.vstack([
         widget,
@@ -178,7 +184,8 @@ def _(HandwaveWidget, drive_napari, mo):
             "Make a fist and move it to drag the data around. Make a finger gun "
             "(index and thumb out) and turn your hand to turn the data. Pinch "
             "with both hands, then spread them apart or bring them together to "
-            "zoom, and turn the line between them to roll the view."
+            "zoom, and turn the line between them to roll the view. Clap to reset "
+            "the view."
         ),
     ])
     return

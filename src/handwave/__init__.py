@@ -9,7 +9,7 @@ import traitlets
 
 from ._assets import AssetUnavailableError, cache_dir, download_assets, get_asset
 
-__all__ = ["HandwaveWidget", "ClutchEvent", "download_assets", "cache_dir"]
+__all__ = ["HandwaveWidget", "ClutchEvent", "ClapEvent", "download_assets", "cache_dir"]
 
 try:
     __version__ = importlib.metadata.version("handwave")
@@ -62,9 +62,25 @@ class ClutchEvent:
     `scipy.spatial.transform.Rotation.from_rotvec(event.drotation)`."""
 
 
+@dataclasses.dataclass(frozen=True)
+class ClapEvent:
+    """Two hands clapping together, delivered to callbacks registered with
+    `HandwaveWidget.on_clap()`. Needs `max_num_hands=2`."""
+
+    type: typing.Literal["clap"]
+    x: float
+    """Where the hands met, 0 (user's left) to 1 (user's right), mirrored like the preview."""
+    y: float
+    """Where the hands met, 0 (top) to 1 (bottom)."""
+    t: float
+    """Browser timestamp, in milliseconds."""
+
+
 ClutchCallback = typing.Callable[[ClutchEvent], typing.Any]
+ClapCallback = typing.Callable[[ClapEvent], typing.Any]
 
 _CLUTCH_EVENT_FIELDS = {field.name for field in dataclasses.fields(ClutchEvent)}
+_CLAP_EVENT_FIELDS = {field.name for field in dataclasses.fields(ClapEvent)}
 
 
 class HandwaveWidget(anywidget.AnyWidget):
@@ -97,6 +113,7 @@ class HandwaveWidget(anywidget.AnyWidget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._clutch_callbacks: list[ClutchCallback] = []
+        self._clap_callbacks: list[ClapCallback] = []
         self.on_msg(self._on_custom_msg)
 
     def on_clutch(self, callback: ClutchCallback, remove: bool = False):
@@ -117,27 +134,58 @@ class HandwaveWidget(anywidget.AnyWidget):
             self._clutch_callbacks.append(callback)
         return callback
 
+    def on_clap(self, callback: ClapCallback, remove: bool = False):
+        """Register a callback for claps (needs `max_num_hands=2`).
+
+        The callback receives a `ClapEvent`. Can be used as a decorator:
+
+            @widget.on_clap
+            def handle(event):
+                reset_view()
+
+        Pass `remove=True` to unregister a callback.
+        """
+        if remove:
+            self._clap_callbacks.remove(callback)
+        else:
+            self._clap_callbacks.append(callback)
+        return callback
+
     def _on_custom_msg(self, _widget, content, _buffers):
         if not isinstance(content, dict):
             return
         if content.get("type") == "handwave:clutch":
             self._dispatch_clutch(content.get("events", []))
+        elif content.get("type") == "handwave:clap":
+            self._dispatch(
+                [
+                    ClapEvent(**{k: v for k, v in fields.items() if k in _CLAP_EVENT_FIELDS})
+                    for fields in content.get("events", [])
+                ],
+                self._clap_callbacks,
+            )
         elif content.get("type") == "handwave:get_asset":
             self._serve_asset(content)
 
     def _dispatch_clutch(self, events):
-        # Deliver every event to every callback even if one raises, so a
-        # failing callback can't swallow another hand's "end" event; then
-        # re-raise the first error so it still shows up.
-        errors = []
+        clutch_events = []
         for fields in events:
             # Ignore fields this version doesn't know about, in case the
             # browser is running a different build of the widget.
             known = {k: v for k, v in fields.items() if k in _CLUTCH_EVENT_FIELDS}
             if "drotation" in known:
                 known["drotation"] = tuple(known["drotation"])
-            event = ClutchEvent(**known)
-            for callback in list(self._clutch_callbacks):
+            clutch_events.append(ClutchEvent(**known))
+        self._dispatch(clutch_events, self._clutch_callbacks)
+
+    @staticmethod
+    def _dispatch(events, callbacks):
+        # Deliver every event to every callback even if one raises, so a
+        # failing callback can't swallow another hand's "end" event; then
+        # re-raise the first error so it still shows up.
+        errors = []
+        for event in events:
+            for callback in list(callbacks):
                 try:
                     callback(event)
                 except Exception as e:

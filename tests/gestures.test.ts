@@ -7,6 +7,7 @@ import {
   dropGhostHands,
   GestureTracker,
   rotationVector,
+  type ClapEvent,
   type ClutchEvent,
   type Point,
 } from "../js/gestures.ts";
@@ -626,12 +627,17 @@ test("a pinch on a fast-moving hand doesn't engage until it slows", () => {
 });
 
 function replay(name: string) {
+  return replayAll(name).events;
+}
+
+function replayAll(name: string) {
   const fixture = JSON.parse(
     readFileSync(`${import.meta.dirname}/fixtures/${name}`, "utf8")
   );
   const tracker = new GestureTracker(undefined, 2);
   const aspect = fixture.height / fixture.width;
   const events: ClutchEvent[] = [];
+  const claps: ClapEvent[] = [];
   for (const frame of fixture.frames) {
     const hands = frame.hands.map(
       (h: { label: string; landmarks: number[][] }) => ({
@@ -639,9 +645,11 @@ function replay(name: string) {
         landmarks: h.landmarks.map(([x, y, z]) => ({ x, y, z })),
       })
     );
-    events.push(...tracker.update(hands, frame.t, aspect).events);
+    const result = tracker.update(hands, frame.t, aspect);
+    events.push(...result.events);
+    claps.push(...result.claps);
   }
-  return events;
+  return { events, claps };
 }
 
 test("recorded: dropping a relaxed hand never engages", () => {
@@ -984,4 +992,69 @@ test("recorded: a finger gun's rotation follows the hand", () => {
 test("pinch and fist events carry no rotation", () => {
   const events = replay("fists.json");
   assert.ok(events.every((e) => e.drotation.every((c) => c === 0)));
+});
+
+/** Claps seen by a two-hand tracker, for frames of (unlabelled) hands 33ms apart. */
+function runClaps(frames: Point[][][], tracker = new GestureTracker(undefined, 2)) {
+  const claps: ClapEvent[] = [];
+  frames.forEach((hands, i) => {
+    const labelled = hands.map((landmarks, k) => ({ label: k ? "Left" : "Right", landmarks }));
+    claps.push(...tracker.update(labelled, i * 33, ASPECT).claps);
+  });
+  return claps;
+}
+
+/** Two open hands `span` frame widths apart, centered at x = 0.5. */
+const apart = (span: number) => [hand(0.5 - span / 2, 0.6, OPEN), hand(0.5 + span / 2, 0.6, OPEN)];
+
+test("two hands coming together quickly into one is a clap", () => {
+  // Hand size (wrist to middle knuckle) is 0.2 frame widths.
+  const claps = runClaps([apart(0.8), apart(0.6), apart(0.3), [hand(0.5, 0.6, OPEN)]]);
+  assert.equal(claps.length, 1);
+  assert.ok(Math.abs(claps[0].x - 0.5) < 0.05, `x = ${claps[0].x}`);
+  // Hands stay clasped: still one clap.
+  assert.equal(
+    runClaps([apart(0.8), apart(0.3), ...Array(10).fill([hand(0.5, 0.6, OPEN)])]).length,
+    1
+  );
+});
+
+test("hands that were already close when they merged aren't a clap", () => {
+  // 1.5 hand sizes apart, closing slowly
+  assert.deepEqual(runClaps([apart(0.3), apart(0.28), apart(0.26), [hand(0.5, 0.6, OPEN)]]), []);
+});
+
+test("hands that were far apart a while before merging aren't a clap", () => {
+  const slow = [apart(0.8), ...Array(10).fill(apart(0.3)), [hand(0.5, 0.6, OPEN)]];
+  assert.deepEqual(runClaps(slow), []);
+});
+
+test("one hand leaving the frame isn't a clap", () => {
+  const [left] = apart(0.8);
+  assert.deepEqual(runClaps([apart(0.8), apart(0.8), [left], [left]]), []);
+});
+
+test("recorded: claps count once each, and pressing palms together slowly doesn't", () => {
+  const { events, claps } = replayAll("claps.json");
+  // The claps are in the first 14.1 s; see the fixture's description.
+  assert.equal(claps.length, 8);
+  assert.ok(claps.every((c) => c.t < 14100), claps.map((c) => c.t).join());
+  assert.ok(claps.every((c) => c.x > 0.4 && c.x < 0.65));
+  // Nothing engages during the claps.
+  assert.deepEqual(events.filter((e) => e.t < 14100), []);
+});
+
+test("recorded: no claps in two-handed use or when one hand leaves", () => {
+  for (const name of [
+    "finger-gun.json",
+    "fist-shakes.json",
+    "fists-facing-camera.json",
+    "fists.json",
+    "hand-drops.json",
+    "not-fists.json",
+    "ok-signs.json",
+    "punch.json",
+  ]) {
+    assert.deepEqual(replayAll(name).claps, [], name);
+  }
 });

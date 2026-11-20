@@ -220,6 +220,18 @@ export interface ClutchOptions {
    * `fistReleaseFrames` frames.
    */
   gunReleaseIndexStraightness: number;
+  /**
+   * Clap: two hands become one (MediaPipe reports clasped hands as a single
+   * hand) between where the two were, within `clapWindowMs` of their being
+   * at least `clapMinSpan` hand sizes apart (palm center to palm center;
+   * hand size is wrist to middle knuckle). In recorded claps the hands
+   * closed from 4-6 hand sizes apart, merging (or vanishing for up to 80 ms
+   * of motion blur, then reappearing as one) within 100-250 ms. Pressed
+   * together slowly, palm to palm, the two palm centers stay about 1.2 hand
+   * sizes apart before merging.
+   */
+  clapMinSpan: number;
+  clapWindowMs: number;
 }
 
 export const defaultClutchOptions: ClutchOptions = {
@@ -241,7 +253,19 @@ export const defaultClutchOptions: ClutchOptions = {
   gunEngageIndexReach: 1.4,
   gunEngageThumb: 0.6,
   gunReleaseIndexStraightness: 0.6,
+  clapMinSpan: 2,
+  clapWindowMs: 300,
 };
+
+/** Two hands clapping together. */
+export interface ClapEvent {
+  type: "clap";
+  /** Where the hands met, 0 (user's left) to 1 (user's right), mirrored like the preview. */
+  x: number;
+  /** Where the hands met, 0 (top) to 1 (bottom). */
+  y: number;
+  t: number;
+}
 
 export interface ClutchEvent {
   type: "start" | "move" | "end";
@@ -918,6 +942,7 @@ export class GestureTracker {
   private aliases = new Map<string, string>();
   /** Labels MediaPipe reported in the previous frame. */
   private prevLabels = new Set<string>();
+  private claps = new ClapDetector();
 
   constructor(opts: ClutchOptions = { ...defaultClutchOptions }, maxHands = 1) {
     this.opts = opts;
@@ -928,11 +953,17 @@ export class GestureTracker {
     hands: Array<{ label: string; landmarks: Point[] }>,
     tMs: number,
     aspect: number
-  ): { events: ClutchEvent[]; visuals: ClutchVisual[] } {
+  ): { events: ClutchEvent[]; visuals: ClutchVisual[]; claps: ClapEvent[] } {
     const events: ClutchEvent[] = [];
     const visuals: ClutchVisual[] = [];
     const seen = new Set<string>();
     hands = dropGhostHands(hands);
+    const clap = this.claps.update(
+      hands.map((h) => h.landmarks),
+      tMs,
+      aspect,
+      this.opts
+    );
     const labels = new Set(hands.map((h) => h.label));
 
     // An alias ends when its clutch is released, or when the clutch's own
@@ -977,7 +1008,11 @@ export class GestureTracker {
     }
 
     this.prevLabels = labels;
-    return { events, visuals };
+    // A hand holding a clutch isn't clapping (opening the hands to clap
+    // releases it first). This also stops a fist that's moving toward where
+    // the other hand just left the frame from counting as one.
+    const holding = [...this.clutches.values()].some((c) => c.state === "engaged");
+    return { events, visuals, claps: clap && !holding ? [clap] : [] };
   }
 
   /**
@@ -1034,6 +1069,62 @@ export class GestureTracker {
  * rejecting large depth gaps.
  */
 const PINCH_DEPTH_WEIGHT = 0.25;
+
+/**
+ * How far along the line between two hands (from either end, as a fraction
+ * of its length) a merged hand must be to count as a clap. When one hand
+ * just leaves the frame, the one left is at an end of the line.
+ */
+const CLAP_MIDDLE = 0.2;
+
+/** Recognizes claps (see `ClutchOptions.clapMinSpan`). */
+export class ClapDetector {
+  /** Recent frames with two hands: their palm centers, and how far apart. */
+  private pairs: Array<{ t: number; a: number[]; b: number[]; span: number }> = [];
+
+  /** `hands` must already be free of ghosts (see `dropGhostHands`). */
+  update(
+    hands: Point[][],
+    tMs: number,
+    aspect: number,
+    opts: ClutchOptions
+  ): ClapEvent | null {
+    this.pairs = this.pairs.filter((p) => tMs - p.t <= opts.clapWindowMs);
+    if (hands.length === 2) {
+      const [a, b] = hands.map((lm) => palmCenter(lm, aspect));
+      const size = (palmLength(hands[0], aspect) + palmLength(hands[1], aspect)) / 2;
+      this.pairs.push({ t: tMs, a, b, span: Math.hypot(b[0] - a[0], b[1] - a[1]) / size });
+      return null;
+    }
+    if (hands.length !== 1 || this.pairs.length === 0) return null;
+    const widest = this.pairs.reduce((m, p) => (p.span > m.span ? p : m));
+    if (widest.span < opts.clapMinSpan) return null;
+    // Where the remaining hand is along the line between the two.
+    const [ax, ay] = widest.a;
+    const [bx, by] = widest.b;
+    const [px, py] = palmCenter(hands[0], aspect);
+    const along =
+      ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) /
+      ((bx - ax) ** 2 + (by - ay) ** 2);
+    if (along < CLAP_MIDDLE || along > 1 - CLAP_MIDDLE) return null;
+    this.pairs = [];
+    return { type: "clap", x: 1 - px, y: py / aspect, t: tMs };
+  }
+}
+
+/** Center of the palm, in frame widths (y rescaled by `aspect`). */
+function palmCenter(lm: Point[], aspect: number): number[] {
+  const n = PALM.length;
+  return [
+    PALM.reduce((s, i) => s + lm[i].x, 0) / n,
+    (PALM.reduce((s, i) => s + lm[i].y, 0) / n) * aspect,
+  ];
+}
+
+/** Wrist to middle knuckle, in frame widths, ignoring depth. */
+function palmLength(lm: Point[], aspect: number): number {
+  return Math.hypot(lm[MIDDLE_MCP].x - lm[WRIST].x, (lm[MIDDLE_MCP].y - lm[WRIST].y) * aspect);
+}
 
 function dist3(a: Point, b: Point, aspect: number, zWeight = 1): number {
   // MediaPipe normalizes x by width and y by height; z is roughly on the
