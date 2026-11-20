@@ -11,6 +11,7 @@ import {
   ClutchVisual,
   defaultClutchOptions,
   GestureTracker,
+  ReelVisual,
 } from "./gestures";
 
 type MediaPipe = typeof CameraUtils & typeof DrawingUtils & typeof Hands;
@@ -143,6 +144,10 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
   /** The latest clap, while its flash is still showing on the preview. */
   let lastClap: ClapEvent | undefined;
+  /** Reeling feedback for the current frame, if the hands are in position. */
+  let reel: ReelVisual | undefined;
+  /** The latest reel step, for its flash on the preview. */
+  let lastReel: { t: number; direction: number } | undefined;
 
   /** Runs gesture recognition; returns visuals to draw on the preview. */
   function updateGestures(results: HandTrackResults): ClutchVisual[] {
@@ -156,7 +161,7 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       videoEl.videoWidth > 0
         ? videoEl.videoHeight / videoEl.videoWidth
         : canvasEl.height / canvasEl.width;
-    const { events, visuals, claps } = tracker.update(
+    const { events, visuals, claps, reels, reelVisual } = tracker.update(
       hands,
       performance.now(),
       aspect
@@ -168,6 +173,11 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
       model.send({ type: "handwave:clap", events: claps });
       lastClap = claps[claps.length - 1];
     }
+    if (reels.length > 0) {
+      model.send({ type: "handwave:reel", events: reels });
+      lastReel = { t: reels[reels.length - 1].t, direction: reels[reels.length - 1].direction };
+    }
+    reel = reelVisual;
     const engaged = tracker.engagedHands();
     if (engaged.join(",") !== model.get("clutched_hands").join(",")) {
       model.set("clutched_hands", engaged);
@@ -268,6 +278,13 @@ function render({ model, el }: { model: WidgetModel; el: HTMLElement }) {
 
     for (const visual of clutchVisuals) {
       drawClutch(canvasCtx, visual, canvasEl.width, canvasEl.height);
+    }
+    if (reel) {
+      const flash =
+        lastReel && performance.now() - lastReel.t < CLAP_FLASH_MS
+          ? 1 - (performance.now() - lastReel.t) / CLAP_FLASH_MS
+          : 0;
+      drawReel(canvasCtx, reel, flash, canvasEl.width, canvasEl.height);
     }
     if (lastClap) {
       const age = (performance.now() - lastClap.t) / CLAP_FLASH_MS;
@@ -481,6 +498,54 @@ function drawClap(
   ctx.beginPath();
   ctx.arc((1 - clap.x) * width, clap.y * height, 15 + 45 * age, 0, 2 * Math.PI);
   ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Draws reeling feedback around the reeling hand, in raw landmark
+ * coordinates (the caller has already mirrored the context): a faint ring,
+ * and an arc that fills toward the next step, clockwise (as the user sees
+ * it) for forward. `flash` (0 to 1) fills the ring just after a step.
+ */
+function drawReel(
+  ctx: CanvasRenderingContext2D,
+  visual: ReelVisual,
+  flash: number,
+  width: number,
+  height: number
+) {
+  const x = visual.point.x * width;
+  const y = visual.point.y * height;
+  const radius = 26;
+  ctx.save();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = CLUTCH_COLORS.idle;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, 2 * Math.PI);
+  ctx.stroke();
+  ctx.strokeStyle = CLUTCH_COLORS.engaged;
+  if (flash > 0) {
+    ctx.globalAlpha = flash;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+  if (visual.progress !== 0) {
+    // The context is mirrored, so a counterclockwise arc here is clockwise
+    // on screen.
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(
+      x,
+      y,
+      radius,
+      -Math.PI / 2,
+      -Math.PI / 2 - visual.progress * 2 * Math.PI,
+      visual.progress > 0
+    );
+    ctx.stroke();
+  }
   ctx.restore();
 }
 

@@ -9,7 +9,14 @@ import traitlets
 
 from ._assets import AssetUnavailableError, cache_dir, download_assets, get_asset
 
-__all__ = ["HandwaveWidget", "ClutchEvent", "ClapEvent", "download_assets", "cache_dir"]
+__all__ = [
+    "HandwaveWidget",
+    "ClutchEvent",
+    "ClapEvent",
+    "ReelEvent",
+    "download_assets",
+    "cache_dir",
+]
 
 try:
     __version__ = importlib.metadata.version("handwave")
@@ -76,11 +83,30 @@ class ClapEvent:
     """Browser timestamp, in milliseconds."""
 
 
+@dataclasses.dataclass(frozen=True)
+class ReelEvent:
+    """One step from reeling, delivered to callbacks registered with
+    `HandwaveWidget.on_reel()`. Needs `max_num_hands=2`.
+
+    Point double-barrelled finger guns (index and middle fingers out, ring
+    and pinky curled) at each other, hold the left one still and circle the
+    right one, like reeling in a fishing line: each turn is one step.
+    """
+
+    type: typing.Literal["reel"]
+    direction: typing.Literal[1, -1]
+    """1 for forward (circling clockwise, as seen in the preview), -1 for backward."""
+    t: float
+    """Browser timestamp, in milliseconds."""
+
+
 ClutchCallback = typing.Callable[[ClutchEvent], typing.Any]
 ClapCallback = typing.Callable[[ClapEvent], typing.Any]
+ReelCallback = typing.Callable[[ReelEvent], typing.Any]
 
 _CLUTCH_EVENT_FIELDS = {field.name for field in dataclasses.fields(ClutchEvent)}
 _CLAP_EVENT_FIELDS = {field.name for field in dataclasses.fields(ClapEvent)}
+_REEL_EVENT_FIELDS = {field.name for field in dataclasses.fields(ReelEvent)}
 
 
 class HandwaveWidget(anywidget.AnyWidget):
@@ -114,6 +140,7 @@ class HandwaveWidget(anywidget.AnyWidget):
         super().__init__(**kwargs)
         self._clutch_callbacks: list[ClutchCallback] = []
         self._clap_callbacks: list[ClapCallback] = []
+        self._reel_callbacks: list[ReelCallback] = []
         self.on_msg(self._on_custom_msg)
 
     def on_clutch(self, callback: ClutchCallback, remove: bool = False):
@@ -151,6 +178,24 @@ class HandwaveWidget(anywidget.AnyWidget):
             self._clap_callbacks.append(callback)
         return callback
 
+    def on_reel(self, callback: ReelCallback, remove: bool = False):
+        """Register a callback for reeling steps (needs `max_num_hands=2`).
+
+        The callback receives a `ReelEvent`, one per turn. Can be used as a
+        decorator:
+
+            @widget.on_reel
+            def handle(event):
+                show_item(current + event.direction)
+
+        Pass `remove=True` to unregister a callback.
+        """
+        if remove:
+            self._reel_callbacks.remove(callback)
+        else:
+            self._reel_callbacks.append(callback)
+        return callback
+
     def _on_custom_msg(self, _widget, content, _buffers):
         if not isinstance(content, dict):
             return
@@ -163,6 +208,14 @@ class HandwaveWidget(anywidget.AnyWidget):
                     for fields in content.get("events", [])
                 ],
                 self._clap_callbacks,
+            )
+        elif content.get("type") == "handwave:reel":
+            self._dispatch(
+                [
+                    ReelEvent(**{k: v for k, v in fields.items() if k in _REEL_EVENT_FIELDS})
+                    for fields in content.get("events", [])
+                ],
+                self._reel_callbacks,
             )
         elif content.get("type") == "handwave:get_asset":
             self._serve_asset(content)

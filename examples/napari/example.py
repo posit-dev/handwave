@@ -63,6 +63,10 @@ def _(math, np, viewer):
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
 
+    # What reeling steps through: all the channels together, then each on its own.
+    channel_views = ["all channels", *(layer.name for layer in viewer.layers)]
+    channel_view = {"index": 0}
+
 
     def rotate_about(vec, axis, theta):
         """Rotate `vec` by `theta` radians about `axis` (Rodrigues' formula)."""
@@ -156,6 +160,21 @@ def _(math, np, viewer):
             viewer.scene.camera.set_view_direction(view, rotate_about(up, view, -turn))
 
 
+    def show_channel(index):
+        """Show `channel_views[index]` (wrapping around), and say which it is."""
+        index %= len(channel_views)
+        channel_view["index"] = index
+        for layer in viewer.layers:
+            layer.visible = index == 0 or layer.name == channel_views[index]
+        viewer.canvas.overlays.text.text = channel_views[index]
+        viewer.canvas.overlays.text.visible = True
+
+
+    def step_channel(event):
+        """Reeling: step to the next or previous channel."""
+        show_channel(channel_view["index"] + event.direction)
+
+
     def reset_view(event):
         """Clap: back to the starting view."""
         viewer.reset_view()
@@ -169,14 +188,15 @@ def _(math, np, viewer):
         else:
             pinch(event)
 
-    return drive_napari, reset_view
+    return drive_napari, reset_view, step_channel
 
 
 @app.cell
-def _(HandwaveWidget, drive_napari, mo, reset_view):
+def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
     handwave_widget = HandwaveWidget(max_num_hands=2, width=320, height=240, debug=True)
     handwave_widget.on_clutch(drive_napari)
     handwave_widget.on_clap(reset_view)
+    handwave_widget.on_reel(step_channel)
     widget = mo.ui.anywidget(handwave_widget)
     mo.vstack([
         widget,
@@ -185,7 +205,11 @@ def _(HandwaveWidget, drive_napari, mo, reset_view):
             "(index and thumb out) and turn your hand to turn the data. Pinch "
             "with both hands, then spread them apart or bring them together to "
             "zoom, and turn the line between them to roll the view. Clap to reset "
-            "the view."
+            "the view. To step through the channels, point double-barrelled finger "
+            "guns (index and middle fingers out) at each other, hold your left hand "
+            "still, and circle your right hand like reeling in a fishing line: "
+            "clockwise (as you see it in the preview) for the next channel, the "
+            "other way for the previous one."
         ),
     ])
     return

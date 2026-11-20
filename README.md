@@ -103,6 +103,18 @@ def on_clap(event):
 
 A clap is two hands, at least two hand lengths apart, becoming one (MediaPipe sees clasped hands as a single hand) somewhere between where they were, within 0.3 seconds. Bringing your hands together slowly doesn't count, and neither does one hand leaving the frame. Claps are ignored while either hand is clutching.
 
+## Reel
+
+With `max_num_hands=2`, you can step through a list of things (channels, layers, dates) by reeling: point double-barrelled finger guns (index and middle fingers out, ring and pinky curled) at each other, hold your left hand still, and circle your right hand like winding a fishing reel. Each turn sends a `ReelEvent` to callbacks registered with `on_reel()`:
+
+```python
+@widget.on_reel
+def on_reel(event):
+    show_item(current + event.direction)
+```
+
+`event.direction` is 1 for forward (circling clockwise, as you see it in the preview) and -1 for backward. The first step comes most of the way (70%) through your first turn, then one per full turn after that. Stopping for a moment starts the count over, and so does dropping the pose; going back the other way takes a full turn, so wobbling just past a step won't undo it. While your hands are in position, the preview shows a ring around your right hand that fills toward the next step and flashes when it steps.
+
 ## Offline use
 
 handwave uses Google's [MediaPipe Hands](https://github.com/google-ai-edge/mediapipe) model, which isn't bundled with the package. The first time the widget runs, it downloads the MediaPipe files it needs (about 16 MB) from the jsDelivr CDN and caches them locally. After that, the widget works without an internet connection.

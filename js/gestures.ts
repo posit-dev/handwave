@@ -232,6 +232,30 @@ export interface ClutchOptions {
    */
   clapMinSpan: number;
   clapWindowMs: number;
+  /**
+   * Reel: with both hands making double-barrelled finger guns (index and
+   * middle fingers extended, reach at least `fistReleaseReach`; ring and
+   * pinky curled, reach at most `reelCurledReach`) pointed at each other,
+   * and the hand on the user's left held still, circling the right hand
+   * steps forward (clockwise as seen in the preview) or backward. Turns
+   * are measured by how far the right hand's direction of motion turns,
+   * counted only while it moves at least `reelMinSpeed` palm lengths per
+   * second and the left hand at most `reelAnchorMaxSpeed`. The first step
+   * comes at `reelFirstTurn` of a turn, then one per full turn after
+   * that; stopping for `reelIdleMs` starts the count over.
+   *
+   * In recorded reeling (fixture `reels.json`), one deliberate turn
+   * measured 0.77-1.03 turns, and three measured up to 3.7, because the
+   * hand curled into a small hook as it stopped. The left hand moved at
+   * most 2.1 palm lengths per second (typically 0.3) while the right one
+   * circled at about 3. A lower `reelMinSpeed` misses less of each turn
+   * but counts more of the hook.
+   */
+  reelCurledReach: number;
+  reelMinSpeed: number;
+  reelAnchorMaxSpeed: number;
+  reelFirstTurn: number;
+  reelIdleMs: number;
 }
 
 export const defaultClutchOptions: ClutchOptions = {
@@ -255,7 +279,28 @@ export const defaultClutchOptions: ClutchOptions = {
   gunReleaseIndexStraightness: 0.6,
   clapMinSpan: 2,
   clapWindowMs: 300,
+  reelCurledReach: 1.5,
+  reelMinSpeed: 1,
+  reelAnchorMaxSpeed: 3,
+  reelFirstTurn: 0.7,
+  reelIdleMs: 300,
 };
+
+/** One step from reeling (see `ClutchOptions.reelCurledReach`). */
+export interface ReelEvent {
+  type: "reel";
+  /** 1 for forward (clockwise in the preview), -1 for backward. */
+  direction: 1 | -1;
+  t: number;
+}
+
+/** Feedback for reeling, to draw on the preview. */
+export interface ReelVisual {
+  /** The reeling hand's palm, in raw (unmirrored) landmark coordinates. */
+  point: { x: number; y: number };
+  /** Progress toward the next step, from -1 (backward) to 1 (forward). */
+  progress: number;
+}
 
 /** Two hands clapping together. */
 export interface ClapEvent {
@@ -943,6 +988,7 @@ export class GestureTracker {
   /** Labels MediaPipe reported in the previous frame. */
   private prevLabels = new Set<string>();
   private claps = new ClapDetector();
+  private reel = new ReelDetector();
 
   constructor(opts: ClutchOptions = { ...defaultClutchOptions }, maxHands = 1) {
     this.opts = opts;
@@ -953,12 +999,24 @@ export class GestureTracker {
     hands: Array<{ label: string; landmarks: Point[] }>,
     tMs: number,
     aspect: number
-  ): { events: ClutchEvent[]; visuals: ClutchVisual[]; claps: ClapEvent[] } {
+  ): {
+    events: ClutchEvent[];
+    visuals: ClutchVisual[];
+    claps: ClapEvent[];
+    reels: ReelEvent[];
+    reelVisual?: ReelVisual;
+  } {
     const events: ClutchEvent[] = [];
     const visuals: ClutchVisual[] = [];
     const seen = new Set<string>();
     hands = dropGhostHands(hands);
     const clap = this.claps.update(
+      hands.map((h) => h.landmarks),
+      tMs,
+      aspect,
+      this.opts
+    );
+    const reel = this.reel.update(
       hands.map((h) => h.landmarks),
       tMs,
       aspect,
@@ -1012,7 +1070,13 @@ export class GestureTracker {
     // releases it first). This also stops a fist that's moving toward where
     // the other hand just left the frame from counting as one.
     const holding = [...this.clutches.values()].some((c) => c.state === "engaged");
-    return { events, visuals, claps: clap && !holding ? [clap] : [] };
+    return {
+      events,
+      visuals,
+      claps: clap && !holding ? [clap] : [],
+      reels: reel.event ? [reel.event] : [],
+      reelVisual: reel.visual,
+    };
   }
 
   /**
@@ -1109,6 +1173,184 @@ export class ClapDetector {
     if (along < CLAP_MIDDLE || along > 1 - CLAP_MIDDLE) return null;
     this.pairs = [];
     return { type: "clap", x: 1 - px, y: py / aspect, t: tMs };
+  }
+}
+
+/** How far back (ms) to look when measuring a reeling hand's direction. */
+const REEL_VELOCITY_MS = 50;
+/**
+ * Largest change in direction (radians) between frames that counts toward
+ * a turn. Back-and-forth movement reverses direction (a change of about
+ * pi, with either sign), which says nothing about which way it's turning.
+ */
+const REEL_MAX_TURN = Math.PI / 2;
+/**
+ * How closely (cosine of the angle) each double gun must point at the
+ * other hand: within 60 degrees.
+ */
+const REEL_AIM = 0.5;
+/**
+ * A reeling hand that has stayed within this distance (palm lengths) of
+ * where it is for the last `reelIdleMs` has stopped, and the turn count
+ * starts over. In recorded reeling the hand always moved at least 0.25 in
+ * that time (it slows down at the top and bottom of each turn), and each
+ * pause between turns dropped to 0.16 or less.
+ */
+const REEL_IDLE_DISTANCE = 0.2;
+
+/** Recognizes reeling (see `ClutchOptions.reelCurledReach`). */
+export class ReelDetector {
+  private trails: Array<Array<{ t: number; p: number[] }>> = [[], []];
+  /** Direction the reeling hand last moved in, if it was moving. */
+  private heading: number | undefined;
+  /** Turns since the last step: positive forward (clockwise in the preview). */
+  private turns = 0;
+  /** Direction of the last step since the hand last stopped, or 0. */
+  private lastDirection: -1 | 0 | 1 = 0;
+  private lastPose = -Infinity;
+  /** The reeling hand's recent palm positions (palm lengths), to tell when it stops. */
+  private path: Array<{ t: number; p: number[] }> = [];
+
+  /** `hands` must already be free of ghosts (see `dropGhostHands`). */
+  update(
+    hands: Point[][],
+    tMs: number,
+    aspect: number,
+    opts: ClutchOptions
+  ): { event?: ReelEvent; visual?: ReelVisual } {
+    const pose = hands.length === 2 && this.isPose(hands, aspect, opts);
+    if (!pose) {
+      if (tMs - this.lastPose > opts.reelIdleMs) this.reset();
+      return {};
+    }
+    this.lastPose = tMs;
+    // The hand on the user's left (larger raw x) holds still; the other reels.
+    const [right, left] =
+      palmCenter(hands[0], aspect)[0] < palmCenter(hands[1], aspect)[0]
+        ? hands
+        : [hands[1], hands[0]];
+    const v = this.velocity(0, right, tMs, aspect);
+    const anchor = this.velocity(1, left, tMs, aspect);
+    const anchorSpeed = Math.hypot(...anchor);
+    const speed = Math.hypot(...v);
+    if (speed >= opts.reelMinSpeed && anchorSpeed <= opts.reelAnchorMaxSpeed) {
+      const heading = Math.atan2(v[1], v[0]);
+      if (this.heading !== undefined) {
+        const turn = wrapToPi(heading - this.heading);
+        // Raw image coordinates have y down and x mirrored, so clockwise in
+        // the preview is a negative turn here.
+        if (Math.abs(turn) < REEL_MAX_TURN) this.turns -= turn / (2 * Math.PI);
+      }
+      this.heading = heading;
+    } else {
+      this.heading = undefined;
+    }
+    if (this.stopped(right, tMs, aspect, opts)) {
+      this.turns = 0;
+      this.lastDirection = 0;
+    }
+    // Each step uses up a turn, so the next one in the same direction needs a
+    // full turn more. Going back the other way also takes a full turn, so
+    // that wobbling just past a step can't undo it.
+    let event: ReelEvent | undefined;
+    for (const direction of [1, -1] as const) {
+      const needed = this.lastDirection === -direction ? 1 : opts.reelFirstTurn;
+      if (direction * this.turns >= needed) {
+        this.turns -= direction;
+        this.lastDirection = direction;
+        event = { type: "reel", direction, t: tMs };
+        break;
+      }
+    }
+    const [x, y] = palmCenter(right, aspect);
+    return {
+      event,
+      visual: {
+        point: { x, y: y / aspect },
+        progress: this.progress(opts),
+      },
+    };
+  }
+
+  /** Progress toward the next step, -1 (backward) to 1 (forward). */
+  private progress(opts: ClutchOptions): number {
+    const first = opts.reelFirstTurn;
+    const toward = (direction: number) => {
+      const x = direction * this.turns;
+      // Where the count starts for a step this way, and where it fires.
+      const [from, to] =
+        this.lastDirection === 0
+          ? [0, first]
+          : this.lastDirection === direction
+            ? [first - 1, first]
+            : [1 - first, 1];
+      return Math.max(0, Math.min(1, (x - from) / (to - from)));
+    };
+    const forward = toward(1);
+    const backward = toward(-1);
+    return forward >= backward ? forward : -backward;
+  }
+
+  /** Whether the reeling hand has stayed put for `reelIdleMs`. */
+  private stopped(lm: Point[], tMs: number, aspect: number, opts: ClutchOptions): boolean {
+    const size = palmLength(lm, aspect);
+    const [x, y] = palmCenter(lm, aspect);
+    this.path.push({ t: tMs, p: [x / size, y / size] });
+    while (this.path.length > 2 && tMs - this.path[1].t >= opts.reelIdleMs) this.path.shift();
+    if (tMs - this.path[0].t < opts.reelIdleMs) return false;
+    const [px, py] = this.path[this.path.length - 1].p;
+    return this.path.every(({ p }) => Math.hypot(p[0] - px, p[1] - py) < REEL_IDLE_DISTANCE);
+  }
+
+  private reset() {
+    this.path = [];
+    this.trails = [[], []];
+    this.heading = undefined;
+    this.turns = 0;
+    this.lastDirection = 0;
+  }
+
+  /** Both hands are double guns pointed at each other. */
+  private isPose(hands: Point[][], aspect: number, opts: ClutchOptions): boolean {
+    const centers = hands.map((lm) => palmCenter(lm, aspect));
+    return hands.every((lm, i) => {
+      const [middle, ring, pinky] = [MIDDLE_MCP, RING_MCP, PINKY_MCP].map(
+        (mcp) =>
+          dist3(lm[mcp + 3], lm[WRIST], aspect) /
+          Math.max(dist3(lm[mcp], lm[WRIST], aspect), 1e-6)
+      );
+      if (
+        middle < opts.fistReleaseReach ||
+        ring > opts.reelCurledReach ||
+        pinky > opts.reelCurledReach
+      ) {
+        return false;
+      }
+      // Barrel: knuckle to fingertip of the index finger, in the image. A
+      // curled index points back at the wrist, so this also checks that
+      // the index is out.
+      const bx = lm[INDEX_TIP].x - lm[INDEX_MCP].x;
+      const by = (lm[INDEX_TIP].y - lm[INDEX_MCP].y) * aspect;
+      const [cx, cy] = centers[i];
+      const [ox, oy] = centers[1 - i];
+      const cos =
+        (bx * (ox - cx) + by * (oy - cy)) /
+        Math.max(Math.hypot(bx, by) * Math.hypot(ox - cx, oy - cy), 1e-9);
+      return cos >= REEL_AIM;
+    });
+  }
+
+  /** Palm velocity of hand `k`, in palm lengths per second. */
+  private velocity(k: number, lm: Point[], tMs: number, aspect: number): number[] {
+    const trail = this.trails[k];
+    const p = palmCenter(lm, aspect);
+    trail.push({ t: tMs, p });
+    while (trail.length > 2 && tMs - trail[1].t >= REEL_VELOCITY_MS) trail.shift();
+    const first = trail[0];
+    const dt = (tMs - first.t) / 1000;
+    if (dt <= 0) return [0, 0];
+    const size = palmLength(lm, aspect);
+    return [(p[0] - first.p[0]) / dt / size, (p[1] - first.p[1]) / dt / size];
   }
 }
 

@@ -9,6 +9,7 @@ import {
   rotationVector,
   type ClapEvent,
   type ClutchEvent,
+  type ReelEvent,
   type Point,
 } from "../js/gestures.ts";
 
@@ -638,6 +639,7 @@ function replayAll(name: string) {
   const aspect = fixture.height / fixture.width;
   const events: ClutchEvent[] = [];
   const claps: ClapEvent[] = [];
+  const reels: ReelEvent[] = [];
   for (const frame of fixture.frames) {
     const hands = frame.hands.map(
       (h: { label: string; landmarks: number[][] }) => ({
@@ -648,8 +650,9 @@ function replayAll(name: string) {
     const result = tracker.update(hands, frame.t, aspect);
     events.push(...result.events);
     claps.push(...result.claps);
+    reels.push(...result.reels);
   }
-  return { events, claps };
+  return { events, claps, reels };
 }
 
 test("recorded: dropping a relaxed hand never engages", () => {
@@ -1056,5 +1059,182 @@ test("recorded: no claps in two-handed use or when one hand leaves", () => {
     "punch.json",
   ]) {
     assert.deepEqual(replayAll(name).claps, [], name);
+  }
+});
+
+/**
+ * Synthetic double-barrelled finger gun: palm centered near (cx, cy), the
+ * barrel pointing along `dir` (+1: toward larger x in raw image
+ * coordinates). Each finger is extended along the barrel or curled back to
+ * its knuckle, as given by `fingers` (index, middle, ring, pinky). The
+ * barrel points along `up` instead when that's given, as a unit vector.
+ */
+function doubleGun(
+  cx: number,
+  cy: number,
+  dir: number,
+  fingers = [true, true, false, false],
+  up?: { x: number; y: number }
+): Point[] {
+  // Isotropic frame-width units with y down, then converted.
+  const along = up ?? { x: dir, y: 0 };
+  const across = { x: -along.y, y: along.x };
+  const c = { x: cx, y: cy * ASPECT };
+  const at = (a: number, b: number): Point => ({
+    x: c.x + along.x * a + across.x * b,
+    y: (c.y + along.y * a + across.y * b) / ASPECT,
+    z: 0,
+  });
+  const lm: Point[] = Array.from({ length: 21 }, () => at(0, 0));
+  lm[0] = at(-0.08, 0); // wrist, 0.1 behind the knuckles
+  for (const k of [1, 2, 3, 4]) lm[k] = at(-0.06 + 0.02 * k, -0.04 - 0.01 * k); // thumb
+  [5, 9, 13, 17].forEach((mcp, f) => {
+    const side = -0.03 + 0.02 * f;
+    lm[mcp] = at(0.02, side);
+    for (const j of [1, 2, 3]) {
+      lm[mcp + j] = fingers[f] ? at(0.02 + 0.027 * j, side) : at(0.02 - 0.01 * j, side);
+    }
+  });
+  return lm;
+}
+
+/** Frames (33ms apart) of `turns` turns of the right hand around (0.3, 0.5), forward if positive. */
+function reeling(
+  turns: number,
+  opts: { left?: (i: number) => Point[]; right?: (x: number, y: number) => Point[]; start?: number } = {}
+): Point[][][] {
+  const frames: Point[][][] = [];
+  const n = Math.round(Math.abs(turns) * 30); // one turn a second
+  const left = opts.left ?? (() => doubleGun(0.7, 0.5, -1));
+  const right = opts.right ?? ((x: number, y: number) => doubleGun(x, y, 1));
+  for (let i = 0; i <= n; i++) {
+    // Forward is clockwise in the mirrored preview: decreasing angle in raw
+    // image coordinates (y down).
+    const a = (opts.start ?? 0) - Math.sign(turns) * (2 * Math.PI * i) / 30;
+    frames.push([right(0.3 + 0.06 * Math.cos(a), 0.5 + (0.06 * Math.sin(a)) / ASPECT), left(i)]);
+  }
+  return frames;
+}
+
+/** Hold still for `ms`: repeats the last frame. */
+const hold = (frames: Point[][][], ms: number) =>
+  Array.from({ length: Math.round(ms / 33) }, () => frames[frames.length - 1]);
+
+function runReels(frames: Point[][][]) {
+  const tracker = new GestureTracker(undefined, 2);
+  const reels: ReelEvent[] = [];
+  frames.forEach((hands, i) => {
+    const labelled = hands.map((landmarks, k) => ({ label: k ? "Left" : "Right", landmarks }));
+    reels.push(...tracker.update(labelled, i * 33, ASPECT).reels);
+  });
+  return reels.map((e) => e.direction);
+}
+
+test("each turn of reeling is one step, forward or backward", () => {
+  assert.deepEqual(runReels(reeling(2.2)), [1, 1]);
+  assert.deepEqual(runReels(reeling(-1)), [-1]);
+  // The first step comes most of the way around the first turn.
+  assert.deepEqual(runReels(reeling(0.5)), []);
+});
+
+test("stopping partway through a turn starts the count over", () => {
+  const first = reeling(0.5);
+  const again = reeling(0.5, { start: -Math.PI });
+  assert.deepEqual(runReels([...first, ...hold(first, 500), ...again]), []);
+  // Without the pause, that's most of a turn.
+  assert.deepEqual(runReels(reeling(1)), [1]);
+});
+
+test("hands dropping out partway through a turn start the count over", () => {
+  const first = reeling(0.5);
+  // Back from the other side of the circle, so the hand hasn't just stopped.
+  const again = reeling(0.5);
+  const gone = Array.from({ length: 15 }, () => [first[first.length - 1][1]]);
+  assert.deepEqual(runReels([...first, ...gone, ...again]), []);
+});
+
+test("wobbling back just past a step doesn't step back", () => {
+  // 0.75 turns forward steps once; 0.6 back doesn't undo it.
+  const forward = reeling(0.75);
+  const back = reeling(-0.6, { start: -2 * Math.PI * 0.75 });
+  assert.deepEqual(runReels([...forward, ...back]), [1]);
+});
+
+test("jiggling back and forth isn't reeling", () => {
+  const frames: Point[][][] = [];
+  for (let i = 0; i < 90; i++) {
+    const y = 0.5 + 0.08 * Math.sin((2 * Math.PI * i) / 10);
+    frames.push([doubleGun(0.3, y, 1), doubleGun(0.7, 0.5, -1)]);
+  }
+  assert.deepEqual(runReels(frames), []);
+});
+
+test("reeling needs the left hand still", () => {
+  const swinging = (i: number) => doubleGun(0.7, 0.5 + 0.1 * Math.sin(i / 2), -1);
+  assert.deepEqual(runReels(reeling(2.2, { left: swinging })), []);
+});
+
+test("reeling needs both hands as double guns, pointed at each other", () => {
+  const variants: Array<[string, (x: number, y: number) => Point[]]> = [
+    ["index curled", (x, y) => doubleGun(x, y, 1, [false, true, false, false])],
+    ["middle curled (a finger gun)", (x, y) => doubleGun(x, y, 1, [true, false, false, false])],
+    ["ring out", (x, y) => doubleGun(x, y, 1, [true, true, true, false])],
+    ["pinky out", (x, y) => doubleGun(x, y, 1, [true, true, false, true])],
+    ["pointing up", (x, y) => doubleGun(x, y, 1, undefined, { x: 0, y: -1 })],
+  ];
+  for (const [name, right] of variants) {
+    assert.deepEqual(runReels(reeling(2.2, { right })), [], name);
+  }
+  // One hand on its own
+  assert.deepEqual(runReels(reeling(2.2).map(([right]) => [right])), []);
+});
+
+test("recorded: each turn of reeling is one step, and near misses aren't", () => {
+  const { events, reels } = replayAll("reels.json");
+  // Segments (seconds) and the turns made in each; see the fixture's description.
+  const segments: Array<[number, number, number | undefined]> = [
+    [2.1, 3.7, 1],
+    [4.4, 6.9, 2],
+    [7.5, 11.1, 3],
+    [11.9, 18.1, undefined], // forward variations: about 10 turns
+    [21.5, 23.4, -1],
+    [23.8, 26.2, -2],
+    [26.6, 29.7, -3],
+    [30.1, 36.1, undefined], // backward variations: about 5 turns
+    [41.7, 63.4, 0], // held still, a single finger gun, one hand circling
+  ];
+  for (const [from, to, turns] of segments) {
+    const steps = reels.filter((e) => e.t >= from * 1000 && e.t <= to * 1000);
+    if (turns === undefined) {
+      assert.ok(steps.length >= 5, `${from}-${to}: ${steps.length} steps`);
+      assert.ok(steps.every((e) => e.direction === steps[0].direction));
+    } else {
+      assert.deepEqual(
+        steps.map((e) => e.direction),
+        Array(Math.abs(turns)).fill(Math.sign(turns)),
+        `${from}-${to} s`
+      );
+    }
+  }
+  // Forward variations are forward, backward ones backward.
+  assert.ok(reels.filter((e) => e.t > 11900 && e.t < 18100).every((e) => e.direction === 1));
+  assert.ok(reels.filter((e) => e.t > 30100 && e.t < 36100).every((e) => e.direction === -1));
+  // No clutch engages while reeling.
+  assert.deepEqual(events.filter((e) => e.t < 36100), []);
+});
+
+test("recorded: no reeling in other gestures", () => {
+  for (const name of [
+    "claps.json",
+    "finger-gun.json",
+    "fist-shakes.json",
+    "fists-facing-camera.json",
+    "fists.json",
+    "hand-drops.json",
+    "not-fists.json",
+    "ok-signs.json",
+    "punch.json",
+  ]) {
+    assert.deepEqual(replayAll(name).reels, [], name);
   }
 });
