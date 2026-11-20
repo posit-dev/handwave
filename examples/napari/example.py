@@ -57,7 +57,7 @@ def _(napari, qt_pump):
 @app.cell
 def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
-    GRAB_GAIN = 1.5  # canvas widths panned per frame width of fist movement
+    GRAB_GAIN = 3  # canvas widths panned per frame width of fist movement
     AIM_GAIN = 3  # how far the data turns per turn of the hand
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
@@ -237,7 +237,7 @@ def _(math, np, viewer):
             grab(event)
         elif event.gesture == "gun":
             aim(event)
-        else:
+        elif event.gesture == "pinch":
             pinch(event)
 
     return drive_napari, reset_view, step_channel
@@ -252,17 +252,17 @@ def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
     widget = mo.ui.anywidget(handwave_widget)
     mo.vstack([
         widget,
-        mo.md(
-            "Make a fist and move it to drag the data around. Make a finger gun "
-            "(index and thumb out) and turn your hand to turn the data. Pinch "
-            "with both hands, then spread them apart or bring them together to "
-            "zoom, and turn the line between them to roll the view. Clap twice "
-            "(clap, brief pause, clap) to reset the view. To step through the channels, point double-barrelled finger "
-            "guns (index and middle fingers out) at each other, hold your left hand "
-            "still, and circle your right hand like reeling in a fishing line: "
-            "clockwise (as you see it in the preview) for the next channel, the "
-            "other way for the previous one."
-        ),
+        # mo.md(
+        #     "Make a fist and move it to drag the data around. Make a finger gun "
+        #     "(index and thumb out) and turn your hand to turn the data. Pinch "
+        #     "with both hands, then spread them apart or bring them together to "
+        #     "zoom, and turn the line between them to roll the view. Clap twice "
+        #     "(clap, brief pause, clap) to reset the view. To step through the channels, point double-barrelled finger "
+        #     "guns (index and middle fingers out) at each other, hold your left hand "
+        #     "still, and circle your right hand like reeling in a fishing line: "
+        #     "clockwise (as you see it in the preview) for the next channel, the "
+        #     "other way for the previous one."
+        # ),
     ])
     return
 
