@@ -69,6 +69,10 @@ class ClutchEvent:
     hand's physical turn, from the user's point of view. Rotate something by
     this to turn it with the hand, e.g. with
     `scipy.spatial.transform.Rotation.from_rotvec(event.drotation)`."""
+    trigger: bool = False
+    """Finger gun: whether its trigger is pulled (thumb dropped onto the index
+    finger, held 50 ms). Watch it change between "move" events to click; always
+    False for other gestures, and on "start" and "end"."""
 
 
 @dataclasses.dataclass(frozen=True)
