@@ -445,6 +445,7 @@ const CLUTCH_COLORS = {
  * fist (a larger rounded square), finger gun (a diamond) or claw (a knob: a
  * larger circle with a tick). Idle: a ring that fills as the fingers close.
  * Engaged: a solid marker with a tether back to where the gesture started.
+ * A finger gun with its trigger pulled gets a white dot in the middle.
  * Frozen (loosening, or first frame back in view): an amber outline.
  * Suspended (hand gone, or the gesture's fingers at the edge): a dashed
  * orange outline where the hand was, kept inside the frame.
@@ -525,6 +526,13 @@ function drawClutch(
       ctx.globalAlpha = 1;
     }
     ctx.stroke();
+    if (visual.trigger) {
+      // A finger gun's trigger is pulled: a white dot in the diamond.
+      ctx.fillStyle = "#FFFFFF";
+      ctx.beginPath();
+      ctx.arc(x, y, radius / 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
   }
   ctx.restore();
 }

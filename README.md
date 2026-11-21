@@ -38,7 +38,7 @@ pip install git+https://github.com/posit-dev/handwave.git
 |---|---|---|
 | **Pinch** | Make an "OK" sign, then touch your thumb and index fingertips. Move, twist, or push toward the camera while pinching. | clutch, `gesture="pinch"` |
 | **Fist** | Curl all four fingers in. Move it, or turn it like you're holding something. | clutch, `gesture="fist"` |
-| **Finger gun** | Index finger and thumb out, other fingers curled. Aim it around. | clutch, `gesture="gun"` |
+| **Finger gun** | Index finger and thumb out, other fingers curled. Aim it around; drop your thumb onto your index finger to pull the trigger. | clutch, `gesture="gun"` |
 | **Claw** | The grip for turning a doorknob: fingers straight at the knuckles, curled at the tips. Twist it like a dial. | clutch, `gesture="claw"` |
 | **Double clap** | Clap, brief pause, clap. | `on_clap` |
 | **Reel** | Point double-barrelled finger guns (index and middle fingers) at each other. Hold your left hand still and circle your right, like winding a fishing reel. Each turn is one step; clockwise (as you see it in the preview) is forward. | `on_reel` |
@@ -84,6 +84,7 @@ Each clutch sends a `"start"` event, a `"move"` event per video frame, then an `
 | `dtheta` | Change in roll, in radians. Clockwise is positive. |
 | `dscale` | Change in your hand's apparent size, as a ratio. Above 1 means toward the camera. |
 | `drotation` | Change in your hand's 3D orientation, as a rotation vector in screen coordinates (x right, y down, z into the screen). Zeros for a pinch. |
+| `trigger` | Finger gun only: whether the trigger is pulled. |
 
 Build on the relative values (`dx`, `dtheta` and friends) rather than `x` and `y`, so letting go and grabbing again doesn't make anything jump. `drotation` drops straight into `scipy.spatial.transform.Rotation.from_rotvec()`. If you use it to turn a 3D view, give the view some depth cues (perspective, an axes indicator): without them, a turning volume looks the same either way round, and it's easy to see it turning backwards.
 

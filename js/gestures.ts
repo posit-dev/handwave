@@ -262,6 +262,24 @@ export interface ClutchOptions {
   clawReleaseTips: number;
   clawReleaseKnuckles: number;
   /**
+   * Trigger: dropping the thumb onto the index finger while a gun is engaged
+   * pulls it, raising it again lets it go. Measured in the image: the thumb
+   * tip's distance from the index knuckle, in knuckle widths (index knuckle
+   * to pinky knuckle). It pulls below `gunTriggerPull` and lets go above
+   * `gunTriggerRelease`; either change must last `gunTriggerMs`. Recorded
+   * pulls measured 0.34-0.38; aiming, 0.64 or more 95% of the time. A gun
+   * tilted away from the camera with the thumb up stayed at 0.44 or more,
+   * for at most 35 ms below 0.45. The thumb's 3D distance from the middle
+   * finger (as for `gunEngageThumb`) doesn't work here: tilted away, the
+   * thumb foreshortens toward the palm and that reads 0.1-0.4, like a pull.
+   * A gun that looks like it's releasing (see `gunReleaseMs`) can't pull:
+   * closing a gun into a fist drops the thumb about 130 ms before the index
+   * curls enough to release it.
+   */
+  gunTriggerPull: number;
+  gunTriggerRelease: number;
+  gunTriggerMs: number;
+  /**
    * Clap: two hands become one (MediaPipe reports clasped hands as a single
    * hand) between where the two were, within `clapWindowMs` of their being
    * at least `clapMinSpan` hand sizes apart (palm center to palm center;
@@ -332,6 +350,9 @@ export const defaultClutchOptions: ClutchOptions = {
   clawEngageMs: 300,
   clawReleaseTips: 170,
   clawReleaseKnuckles: 140,
+  gunTriggerPull: 0.42,
+  gunTriggerRelease: 0.6,
+  gunTriggerMs: 50,
   clapMinSpan: 2,
   clapWindowMs: 300,
   doubleClapMinMs: 250,
@@ -403,6 +424,12 @@ export interface ClutchEvent {
    * either way.
    */
   drotation: [number, number, number];
+  /**
+   * Finger gun: whether the trigger is pulled (thumb dropped onto the index
+   * finger; see `gunTriggerPull`). Always false for a pinch or fist, and on
+   * "start" and "end".
+   */
+  trigger: boolean;
   /** Milliseconds, from `performance.now()`. */
   t: number;
 }
@@ -431,6 +458,8 @@ export interface ClutchVisual {
   progress: number;
   /** Average straightness of the middle, ring and pinky fingers (0..1). */
   straightness: number;
+  /** An engaged finger gun's trigger is pulled. */
+  trigger: boolean;
   /** Gesture point and start point in raw (unmirrored) landmark coordinates. */
   point: { x: number; y: number };
   anchor?: { x: number; y: number };
@@ -467,6 +496,11 @@ interface Measures {
   indexStraightness3d: number;
   /** Thumb tip to the middle finger's middle joint, in palm lengths. */
   thumbOut: number;
+  /**
+   * Thumb tip to the index knuckle in the image, in knuckle widths (index
+   * knuckle to pinky knuckle): how far a finger gun's trigger is from pulled.
+   */
+  thumbToIndex: number;
   /**
    * How extended the most extended finger is: above 1 when both its reach
    * and its straightness pass the fist's release thresholds.
@@ -523,6 +557,10 @@ export class HandClutch {
   private aboveCount = 0;
   /** When an engaged gun started to look open (see `gunReleaseMs`). */
   private openSince: number | undefined;
+  /** An engaged gun's trigger is pulled (see `gunTriggerPull`). */
+  private trigger = false;
+  /** When the trigger started to look the other way. */
+  private triggerSince: number | undefined;
   // Positions are in frame units; speeds of ~1 frame/sec are typical.
   private fu = new OneEuroFilter(1.5, 8);
   private fy = new OneEuroFilter(1.5, 8);
@@ -715,6 +753,8 @@ export class HandClutch {
       } else if (g === "gun") {
         if (open > releaseAt) {
           this.openSince ??= tMs;
+          // A trigger pull in progress is more likely the hand closing up.
+          this.triggerSince = undefined;
           if (tMs - this.openSince >= opts.gunReleaseMs) {
             events.push(this.event("end", f, tMs));
             this.disengage();
@@ -728,6 +768,7 @@ export class HandClutch {
           // Closed (again): one move covers any turn made while it looked
           // open.
           this.openSince = undefined;
+          this.updateTrigger(m.thumbToIndex, tMs);
           events.push(this.event("move", f, tMs));
           this.last = f;
         }
@@ -792,6 +833,7 @@ export class HandClutch {
         reach: m.reach,
         progress,
         straightness: m.straightness,
+        trigger: this.gesture === "gun" && this.trigger,
         point: this.lastPoint,
         anchor: this.state === "engaged" ? this.anchor : undefined,
       },
@@ -828,9 +870,27 @@ export class HandClutch {
       reach: this.lastReach,
       progress: 0,
       straightness: 0,
+      trigger: this.gesture === "gun" && this.trigger,
       point: this.lastPoint,
       anchor: this.anchor,
     };
+  }
+
+  /** Pull or let go of an engaged gun's trigger, once the thumb has moved for `gunTriggerMs`. */
+  private updateTrigger(thumbToIndex: number, tMs: number) {
+    const { opts } = this;
+    const pulled =
+      thumbToIndex <
+      (this.trigger ? opts.gunTriggerRelease : opts.gunTriggerPull);
+    if (pulled === this.trigger) {
+      this.triggerSince = undefined;
+      return;
+    }
+    this.triggerSince ??= tMs;
+    if (tMs - this.triggerSince >= opts.gunTriggerMs) {
+      this.trigger = pulled;
+      this.triggerSince = undefined;
+    }
   }
 
   private suspend(tMs: number) {
@@ -864,6 +924,8 @@ export class HandClutch {
     this.engageSince = undefined;
     this.aboveCount = 0;
     this.openSince = undefined;
+    this.trigger = false;
+    this.triggerSince = undefined;
     this.last = undefined;
     this.anchor = undefined;
   }
@@ -936,6 +998,7 @@ export class HandClutch {
         this.gesture !== "pinch"
           ? rotationVector(mulTranspose(f.orientation, last.orientation))
           : [0, 0, 0],
+      trigger: type === "move" && this.gesture === "gun" && this.trigger,
       t: tMs,
     };
   }
@@ -979,6 +1042,9 @@ function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
     thumbOut:
       dist3(lm[THUMB_TIP], lm[MIDDLE_MCP + 1], aspect) /
       Math.max(dist3(lm[WRIST], lm[MIDDLE_MCP], aspect), 1e-6),
+    thumbToIndex:
+      dist3(lm[THUMB_TIP], lm[INDEX_MCP], aspect, 0) /
+      Math.max(dist3(lm[INDEX_MCP], lm[PINKY_MCP], aspect, 0), 1e-6),
     extension: Math.max(
       ...reaches.map((r, i) =>
         Math.min(

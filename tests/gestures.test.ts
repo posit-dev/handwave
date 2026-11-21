@@ -1033,6 +1033,73 @@ test("a finger gun's rotation holds while it releases", () => {
   }
 });
 
+test("recorded: aiming and closing a gun into a fist never pull its trigger", () => {
+  // Closing a gun into a fist (27.5 s in finger-gun.json) drops the thumb
+  // about 130 ms before the gun releases.
+  for (const name of ["finger-gun.json", "gun-twists.json", "reels.json"]) {
+    const pulled = replay(name).filter((e) => e.trigger);
+    assert.deepEqual(pulled.map((e) => e.t), [], name);
+  }
+});
+
+test("recorded: tilting a gun away with the thumb up doesn't pull its trigger; real pulls do", () => {
+  // Tilted away (6.4-24.3 s), the thumb foreshortens and looks dropped in
+  // 3D, and a wobble at 25.2 s turns the palm for a frame; then five pulls.
+  const events = replay("trigger-tilt.json").filter((e) => e.gesture === "gun");
+  const pulls: number[] = [];
+  let pulled = false;
+  for (const e of events) {
+    if (e.trigger && !pulled) pulls.push(Math.round(e.t / 100) / 10);
+    pulled = e.trigger;
+  }
+  assert.equal(pulls.length, 5, `pulled at ${pulls}`);
+  assert.ok(pulls.every((t) => t > 26), `pulled at ${pulls}`);
+});
+
+test("dropping the thumb pulls a gun's trigger; raising it lets go", () => {
+  // A recorded gun held still, pointing up, with the thumb out (or its tip
+  // dropped next to the index knuckle, as when pulling the trigger).
+  const fixture = JSON.parse(
+    readFileSync(`${import.meta.dirname}/fixtures/finger-gun.json`, "utf8")
+  );
+  const frame = fixture.frames.find((f: { t: number }) => f.t >= 4000);
+  const gun: Point[] = frame.hands[0].landmarks.map(([x, y, z]: number[]) => ({ x, y, z }));
+  const pulled = gun.map((p, i) =>
+    i === 4
+      ? {
+          x: p.x + (gun[5].x - p.x) * 0.8,
+          y: p.y + (gun[5].y - p.y) * 0.8,
+          z: p.z + (gun[5].z - p.z) * 0.8,
+        }
+      : p
+  );
+  const aspect = fixture.height / fixture.width;
+  const tracker = new GestureTracker(undefined, 2);
+  const frames = [
+    ...Array.from({ length: 8 }, () => gun), // engages after 150 ms
+    pulled, // a single frame isn't enough
+    gun,
+    gun,
+    pulled,
+    pulled,
+    pulled, // 66 ms: pulled
+    pulled,
+    gun,
+    gun,
+    gun, // 66 ms: let go
+    gun,
+  ];
+  // For each frame after the gun engaged: its move's trigger, as 0 or 1.
+  const triggers = frames.flatMap((lm, i) =>
+    tracker
+      .update([{ label: "Right", landmarks: lm }], i * 33, aspect)
+      .events.filter((e) => e.type === "move")
+      .map((e) => (e.trigger ? 1 : 0))
+  );
+  assert.deepEqual(triggers.slice(-11), [0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0]);
+  assert.ok(triggers.slice(0, -11).every((t) => t === 0));
+});
+
 test("pinch events carry no rotation, fist events do", () => {
   const pinches = replay("ok-signs.json").filter((e) => e.gesture === "pinch");
   assert.ok(pinches.length > 0);
