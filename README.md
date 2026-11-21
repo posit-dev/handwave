@@ -10,15 +10,20 @@ Thank you to [Trevor Manz](https://trevorma.nz/) for the widget-ization of this 
 
 ## Installation
 
+handwave is not on PyPI yet. Until it is, install it from GitHub:
+
 ```sh
-pip install handwave
+pip install git+https://github.com/posit-dev/handwave.git
 ```
 
 or with [uv](https://github.com/astral-sh/uv):
 
 ```sh
-uv add handwave
+uv add git+https://github.com/posit-dev/handwave.git
 ```
+
+Installing from source builds the widget's JavaScript, so you'll need
+[Node.js](https://nodejs.org/) (with npm) on your PATH.
 
 ## Usage
 
