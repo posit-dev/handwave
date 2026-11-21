@@ -142,8 +142,8 @@ The widget takes the following configuration options in its constructor:
 - **min_tracking_confidence**: Minimum confidence score for hand tracking, from 0 to 1 (default is 0.5).
 - **precision**: Number of decimal places to round the landmark coordinates to (default is 3).
 - **debug**: Whether to show debug information in the widget (default is False).
-- **width**: Width of the video stream in pixels (default is 320).
-- **height**: Height of the video stream in pixels (default is 240).
+- **width**: Width of the video stream in pixels (default is 640).
+- **height**: Height of the video stream in pixels (default is 480).
 - **pinch_engage_threshold**: Pinch ratio below which a pinch clutch engages (default is 0.25). See [Pinch clutch](#pinch-clutch).
 - **pinch_release_threshold**: Pinch ratio above which a pinch clutch releases (default is 0.4).
 
@@ -167,7 +167,7 @@ jupyter lab examples/notebook/example.ipynb
 
 ### Running the examples
 
-The apps in `examples/` need a few more packages (marimo, Shiny, napari),
+The apps in `examples/` need a few more packages (marimo, Shiny, plotly, napari),
 collected in the `examples` dependency group:
 
 ```sh
@@ -195,5 +195,5 @@ npm run dev
 ```
 
 Open `examples/notebook/example.ipynb` in JupyterLab, VS Code, or your favorite editor
-to start developing. Changes made in `js/` will be reflected
-in the notebook.
+to start developing, and uncomment its development cell: then changes made in `js/`
+will be reflected in the notebook.

@@ -31,6 +31,7 @@ examples = [
     "marimo",
     "napari[pyqt6]",
     "numpy",
+    "plotly>=7.1.0",
     "shiny",
     "shinywidgets",
 ]
