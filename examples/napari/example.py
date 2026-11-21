@@ -59,6 +59,7 @@ def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
     GRAB_GAIN = 3  # canvas widths panned per frame width of two-pinch movement
     AIM_GAIN = 1.5  # how far the data turns per turn of the fist
+    DIAL_DEGREES = 1.5  # how far to twist a pinch to step one z slice (2D view)
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
@@ -66,6 +67,10 @@ def _(math, np, viewer):
     # Each fist's turn since it engaged, and the view at that moment, so the
     # view follows the hand's total turn and never drifts (see `aim`).
     aims = {}
+
+    # Each lone pinch's twist (degrees) not yet turned into a z step, so the
+    # dial steps a slice per DIAL_DEGREES however the twist is split into events.
+    dials = {}
 
     # What reeling steps through: all the channels together, then each on its own.
     channel_views = ["all channels", *(layer.name for layer in viewer.layers)]
@@ -182,21 +187,50 @@ def _(math, np, viewer):
         camera.set_view_direction(turned[:, 2], -turned[:, 1])
 
 
+    def dial(event):
+        """One hand pinching in 2D view: twist it like a dial to step through z."""
+        if viewer.dims.ndisplay != 2 or not viewer.dims.not_displayed:
+            return
+        dials[event.hand] += math.degrees(event.dtheta)
+        steps = int(dials[event.hand] / DIAL_DEGREES)  # toward zero
+        if steps == 0:
+            return
+        # Keep the remainder even when stopped at the first or last slice, so
+        # twisting back steps back at once.
+        dials[event.hand] -= steps * DIAL_DEGREES
+        # The slider napari's arrow keys step (z, for cells3d).
+        axis = viewer.dims.last_used
+        last = int(viewer.dims.nsteps[axis]) - 1
+        step = viewer.dims.current_step[axis] + steps  # clockwise = deeper
+        viewer.dims.set_current_step(axis, min(last, max(0, step)))
+
+
     def pinch(event):
         """
+        One hand pinching, in 2D view: a dial (see `dial`).
+
         Both hands pinching, like two fingers on a trackpad: move them together
         to drag, spread or bring together to zoom, turn to roll.
         """
         if event.type == "start":
             pinches[event.hand] = (event.x, event.y * ASPECT)
+            if len(pinches) == 1:
+                dials[event.hand] = 0.0
+            else:
+                # Two hands: zoom and pan. The first hand stays out of the dial
+                # until it lets go and pinches again on its own.
+                dials.clear()
             return
         if event.type == "end":
             pinches.pop(event.hand, None)
+            dials.pop(event.hand, None)
             return
         # Track each pinch by adding up its movement, so nothing jumps.
         before = dict(pinches)
         hx, hy = pinches.get(event.hand, (event.x, event.y * ASPECT))
         pinches[event.hand] = (hx + event.dx, hy + event.dy)
+        if event.hand in dials:
+            dial(event)
         if len(before) != 2:
             return
         bx, by = pinch_span(before)
@@ -260,7 +294,9 @@ def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
         #     "Make a fist and move it to drag the data around. Make a finger gun "
         #     "(index and thumb out) and turn your hand to turn the data. Pinch "
         #     "with both hands, then spread them apart or bring them together to "
-        #     "zoom, and turn the line between them to roll the view. Clap twice "
+        #     "zoom, and turn the line between them to roll the view. In 2D view, "
+        #     "pinch with one hand and twist it like a dial to step through the "
+        #     "z slices (clockwise goes deeper). Clap twice "
         #     "(clap, brief pause, clap) to reset the view. To step through the channels, point double-barrelled finger "
         #     "guns (index and middle fingers out) at each other, hold your left hand "
         #     "still, and circle your right hand like reeling in a fishing line: "
