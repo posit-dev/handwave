@@ -25,9 +25,32 @@ uv add git+https://github.com/posit-dev/handwave.git
 Installing from source builds the widget's JavaScript, so you'll need
 [Node.js](https://nodejs.org/) (with npm) on your PATH.
 
-## Usage
+## Examples
 
-### Jupyter notebook
+The `examples/` directory has apps you can drive with your hands:
+
+- `examples/notebook/example.ipynb`: the widget in a Jupyter notebook.
+- `examples/marimo/example.py`: a marimo notebook with a shape you can drag, turn and zoom.
+- `examples/napari/example.py`: a marimo notebook that drives a 3D [napari](https://napari.org/) viewer.
+- `examples/shiny/app.py`: a Shiny app with a 3D plotly plot you can turn, pan, zoom and reset.
+
+They need a few more packages (marimo, Shiny, plotly, napari), collected in the
+`examples` dependency group. Clone the repo and run them with
+[uv](https://github.com/astral-sh/uv):
+
+```sh
+git clone https://github.com/posit-dev/handwave.git
+cd handwave
+uv run --group examples jupyter lab examples/notebook/example.ipynb
+uv run --group examples marimo edit examples/marimo/example.py
+uv run --group examples marimo edit examples/napari/example.py
+uv run --group examples shiny run examples/shiny/app.py
+```
+
+Without uv, `pip install -e . --group examples` (pip 25.1 or later) installs
+handwave and the same packages.
+
+## Usage
 
 ```python
 from handwave import HandwaveWidget
@@ -42,7 +65,11 @@ This will show a widget that uses your webcam to detect hand gestures.
 - You can use the `widget.hand` property to retrieve just the first detected hand and its landmarks, as a Pandas data frame (or `None` if no hand is detected).
 - Each hand also has `.attrs["handedness"]` (either "Left" or "Right") and `.attrs["handedness_score"]` properties. Be aware that Left and Right may be swapped depending on whether your camera returns mirrored video or not.
 
-## Pinch clutch
+## Clutch gestures
+
+handwave recognizes three gestures that "clutch": a pinch, a fist and a finger gun. They all work the same way, and send the same kind of events, described under [Clutch events](#clutch-events).
+
+### Pinch clutch
 
 Pinching your thumb and index finger together "clutches" the widget: while you hold the pinch, your hand movements are reported as events, and when you let go they stop. This is how you tell handwave "I mean this" versus "I'm just moving my hand." Release, move your hand somewhere comfortable, and pinch again to keep going, like lifting a mouse off the pad.
 
@@ -67,6 +94,8 @@ def on_clutch(event):
         turn = Rotation.from_rotvec(event.drotation)  # in screen coordinates
 ```
 
+### Clutch events
+
 ```python
 widget = HandwaveWidget()
 
@@ -76,7 +105,7 @@ def on_clutch(event):
         print(event.hand, event.dx, event.dy, event.dtheta, event.dscale)
 ```
 
-Each pinch produces a `"start"` event, then `"move"` events (one per video frame), then an `"end"` event. Each event is a `handwave.ClutchEvent` with:
+Each clutch produces a `"start"` event, then `"move"` events (one per video frame), then an `"end"` event. Each event is a `handwave.ClutchEvent` with:
 
 - **gesture**: `"pinch"`, `"fist"` or `"gun"`.
 - **hand**: `"Left"` or `"Right"`. Each hand has its own clutch, so two-handed gestures work with `max_num_hands=2`.
@@ -88,11 +117,17 @@ Each pinch produces a `"start"` event, then `"move"` events (one per video frame
 
 Use the relative values (`dx`, `dy`, `dtheta`, `dscale`) rather than absolute positions, so that releasing and re-pinching doesn't make anything jump. Movement is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/).
 
+`widget.clutched_hands` lists the hands that are currently clutching with a pinch or a fist (including clutches on hold), and can be observed like any other trait.
+
+### What the preview shows
+
 The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment. A fist works the same way, shown as a larger rounded square at your knuckles, and a finger gun as a diamond, except that neither freezes as it loosens: your knuckles stay put as your fingers open, and a fast-moving fist often looks loose for a frame.
+
+### Losing sight of your hand
 
 If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump (unless it was gone only for a moment, under 0.2 seconds, as when MediaPipe loses a fast-moving hand for a frame: then the movement made meanwhile counts, as if your hand was never lost); bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch. For a fist, it's your four fingers (knuckles to tips) that must stay in view; your thumb and wrist can be off the edge.
 
-`widget.clutched_hands` lists the hands that are currently clutching with a pinch or a fist (including clutches on hold), and can be observed like any other trait.
+### Tuning
 
 If pinches engage too easily or not easily enough, set `debug=True` to see the live pinch ratio (fingertip distance divided by palm length) and how straight your other fingers are (from 0 to 1; engaging needs 0.85 or more), and adjust `pinch_engage_threshold` and `pinch_release_threshold`. Keep the release threshold comfortably above the engage threshold. The debug display also shows a fist's "reach": how far your farthest fingertip is from your wrist, relative to its knuckle, in 3D (so it still works with your fist pointed at the camera). A fist engages below 1.3; an open hand is around 2. An engaged fist releases once a finger is extended (reach above 1.6 and nearly straight) for 3 frames in a row.
 
@@ -169,21 +204,6 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 jupyter lab examples/notebook/example.ipynb
 ```
-
-### Running the examples
-
-The apps in `examples/` need a few more packages (marimo, Shiny, plotly, napari),
-collected in the `examples` dependency group:
-
-```sh
-uv run --group examples jupyter lab examples/notebook/example.ipynb
-uv run --group examples marimo edit examples/marimo/example.py
-uv run --group examples marimo edit examples/napari/example.py
-uv run --group examples shiny run examples/shiny/app.py
-```
-
-Without uv, `pip install --group examples` (pip 25.1 or later) installs the
-same packages.
 
 The widget front-end code is built with esbuild. After setting up Python,
 make sure to install the JavaScript build dependencies locally:
