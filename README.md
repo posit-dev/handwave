@@ -18,7 +18,7 @@ cd handwave
 uv run --group examples marimo edit examples/napari/example.py
 ```
 
-That's the napari demo: a 3D image of cells you can turn, pan, zoom and slice through, all without touching the mouse. The other examples are smaller:
+That's the napari demo: a 3D image of cells you can turn, pan, zoom, slice through and click around in, all without touching the mouse. The other examples are smaller:
 
 ```sh
 uv run --group examples marimo edit examples/marimo/example.py      # a shape to drag, turn and zoom

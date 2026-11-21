@@ -7,16 +7,37 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import asyncio
+    import ctypes
+    import ctypes.util
     import math
+    import sys
 
     import marimo as mo
     import napari
     import numpy as np
+    from qtpy.QtCore import QEvent, QPoint, QPointF, Qt
+    from qtpy.QtGui import QCursor, QMouseEvent
     from qtpy.QtWidgets import QApplication
 
     from handwave import HandwaveWidget
 
-    return HandwaveWidget, QApplication, asyncio, math, mo, napari, np
+    return (
+        HandwaveWidget,
+        QApplication,
+        QCursor,
+        QEvent,
+        QMouseEvent,
+        QPoint,
+        QPointF,
+        Qt,
+        asyncio,
+        ctypes,
+        math,
+        mo,
+        napari,
+        np,
+        sys,
+    )
 
 
 @app.cell
@@ -55,11 +76,25 @@ def _(napari, qt_pump):
 
 
 @app.cell
-def _(math, np, viewer):
+def _(
+    QApplication,
+    QCursor,
+    QEvent,
+    QMouseEvent,
+    QPoint,
+    QPointF,
+    Qt,
+    ctypes,
+    math,
+    np,
+    sys,
+    viewer,
+):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
     GRAB_GAIN = 3  # canvas widths panned per frame width of two-pinch movement
     AIM_GAIN = 1.5  # how far the data turns per turn of the fist
     DIAL_DEGREES = 1.5  # how far to twist a claw to step one z slice (2D view)
+    POINTER_GAIN = 2  # screen widths the mouse pointer moves per frame width of finger gun movement
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
@@ -71,6 +106,11 @@ def _(math, np, viewer):
     # Each claw's twist (degrees) not yet turned into a z step, so the dial
     # steps a slice per DIAL_DEGREES however the twist is split into events.
     dials = {}
+
+    # The finger gun steering the mouse pointer, and where on the screen the
+    # pointer is (unrounded, so slow movement adds up).
+    # `pressed` is the napari widget the trigger is holding the mouse button down on.
+    pointer = {"hand": None, "x": 0.0, "y": 0.0, "pressed": None}
 
     # What reeling steps through: all the channels together, then each on its own.
     channel_views = ["all channels", *(layer.name for layer in viewer.layers)]
@@ -269,9 +309,108 @@ def _(math, np, viewer):
         viewer.reset_view()
 
 
+    if sys.platform == "darwin":
+        core_graphics = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+
+        class CGPoint(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+        core_graphics.CGWarpMouseCursorPosition.argtypes = [CGPoint]
+        core_graphics.CGAssociateMouseAndMouseCursorPosition.argtypes = [ctypes.c_bool]
+
+
+    def warp_pointer(position):
+        """Move the OS mouse pointer to `position`, a QPoint in screen coordinates."""
+        if sys.platform == "darwin":
+            # Qt moves the pointer by posting a mouse event, which macOS allows only
+            # with Accessibility permission. Warping it directly needs none.
+            core_graphics.CGWarpMouseCursorPosition(CGPoint(position.x(), position.y()))
+            # Otherwise the real mouse stops moving the pointer for a moment.
+            core_graphics.CGAssociateMouseAndMouseCursorPosition(True)
+        else:
+            QCursor.setPos(position)
+
+
+    def send_mouse(widget, kind, position, buttons):
+        """Send a napari widget a left-button mouse event at `position` (screen coordinates)."""
+        button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+        QApplication.sendEvent(
+            widget,
+            QMouseEvent(
+                kind,
+                QPointF(widget.mapFromGlobal(position)),
+                QPointF(position),
+                button,
+                buttons,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+
+    def let_go(position):
+        """Release the mouse button the trigger is holding down, if it is."""
+        if pointer["pressed"] is not None:
+            send_mouse(pointer["pressed"], QEvent.Type.MouseButtonRelease, position, Qt.MouseButton.NoButton)
+            pointer["pressed"] = None
+
+
+    def point(event):
+        """
+        Finger gun: move the mouse pointer around the screen from wherever it is,
+        like a finger on a trackpad. The latest gun to engage steers it. Pulling
+        the trigger presses the left mouse button on whatever part of napari is
+        under the pointer (moving meanwhile drags), and letting go releases it.
+        """
+        if event.type == "start":
+            here = QCursor.pos()
+            pointer.update(hand=event.hand, x=float(here.x()), y=float(here.y()))
+            return
+        if event.hand != pointer["hand"]:
+            return
+        if event.type == "end":
+            let_go(QCursor.pos())
+            pointer["hand"] = None
+            return
+        here = QCursor.pos()
+        if abs(here.x() - round(pointer["x"])) > 2 or abs(here.y() - round(pointer["y"])) > 2:
+            # The real mouse moved the pointer: carry on from there.
+            pointer.update(x=float(here.x()), y=float(here.y()))
+        screen = QApplication.screenAt(here) or QApplication.primaryScreen()
+        # dx and dy are both in frame widths.
+        scale = POINTER_GAIN * screen.geometry().width()
+        x = pointer["x"] + scale * event.dx
+        y = pointer["y"] + scale * event.dy
+        if QApplication.screenAt(QPoint(round(x), round(y))) is None:
+            # Off every screen: stop at the edge of the one the pointer is on.
+            bounds = screen.geometry()
+            x = min(max(x, bounds.left()), bounds.right())
+            y = min(max(y, bounds.top()), bounds.bottom())
+        pointer.update(x=x, y=y)
+        position = QPoint(round(x), round(y))
+        warp_pointer(position)
+        # Moving the OS pointer from code doesn't send Qt a mouse move, so tell
+        # napari: a drag goes to what the trigger pressed on, and otherwise the
+        # canvas hears about the pointer passing over it and shows what's under it.
+        canvas = viewer.window._qt_viewer.canvas.native
+        if pointer["pressed"] is not None:
+            send_mouse(pointer["pressed"], QEvent.Type.MouseMove, position, Qt.MouseButton.LeftButton)
+        elif canvas.isVisible() and canvas.rect().contains(canvas.mapFromGlobal(position)):
+            send_mouse(canvas, QEvent.Type.MouseMove, position, Qt.MouseButton.NoButton)
+        if event.trigger and pointer["pressed"] is None:
+            # Only napari's own windows can be clicked this way. Other apps
+            # would need macOS's Accessibility permission.
+            target = QApplication.widgetAt(position)
+            if target is not None:
+                send_mouse(target, QEvent.Type.MouseButtonPress, position, Qt.MouseButton.LeftButton)
+                pointer["pressed"] = target
+        elif not event.trigger:
+            let_go(position)
+
+
     def drive_napari(event):
-        # Finger guns do nothing for now.
-        if event.gesture == "fist":
+        if event.gesture == "gun":
+            point(event)
+        elif event.gesture == "fist":
             aim(event)
         elif event.gesture == "pinch":
             pinch(event)
