@@ -59,7 +59,7 @@ def _(math, np, viewer):
     ASPECT = 240 / 320  # widget height / width, to put pinch y in frame widths
     GRAB_GAIN = 3  # canvas widths panned per frame width of two-pinch movement
     AIM_GAIN = 1.5  # how far the data turns per turn of the fist
-    DIAL_DEGREES = 1.5  # how far to twist a pinch to step one z slice (2D view)
+    DIAL_DEGREES = 1.5  # how far to twist a claw to step one z slice (2D view)
 
     # Where each pinching hand is (frame widths), for two-handed zoom and roll.
     pinches = {}
@@ -68,8 +68,8 @@ def _(math, np, viewer):
     # view follows the hand's total turn and never drifts (see `aim`).
     aims = {}
 
-    # Each lone pinch's twist (degrees) not yet turned into a z step, so the
-    # dial steps a slice per DIAL_DEGREES however the twist is split into events.
+    # Each claw's twist (degrees) not yet turned into a z step, so the dial
+    # steps a slice per DIAL_DEGREES however the twist is split into events.
     dials = {}
 
     # What reeling steps through: all the channels together, then each on its own.
@@ -188,7 +188,16 @@ def _(math, np, viewer):
 
 
     def dial(event):
-        """One hand pinching in 2D view: twist it like a dial to step through z."""
+        """
+        Claw (the grip for turning a doorknob), in 2D view: twist it to step
+        through z.
+        """
+        if event.type == "start":
+            dials[event.hand] = 0.0
+            return
+        if event.type == "end":
+            dials.pop(event.hand, None)
+            return
         if viewer.dims.ndisplay != 2 or not viewer.dims.not_displayed:
             return
         dials[event.hand] += math.degrees(event.dtheta)
@@ -207,30 +216,19 @@ def _(math, np, viewer):
 
     def pinch(event):
         """
-        One hand pinching, in 2D view: a dial (see `dial`).
-
         Both hands pinching, like two fingers on a trackpad: move them together
         to drag, spread or bring together to zoom, turn to roll.
         """
         if event.type == "start":
             pinches[event.hand] = (event.x, event.y * ASPECT)
-            if len(pinches) == 1:
-                dials[event.hand] = 0.0
-            else:
-                # Two hands: zoom and pan. The first hand stays out of the dial
-                # until it lets go and pinches again on its own.
-                dials.clear()
             return
         if event.type == "end":
             pinches.pop(event.hand, None)
-            dials.pop(event.hand, None)
             return
         # Track each pinch by adding up its movement, so nothing jumps.
         before = dict(pinches)
         hx, hy = pinches.get(event.hand, (event.x, event.y * ASPECT))
         pinches[event.hand] = (hx + event.dx, hy + event.dy)
-        if event.hand in dials:
-            dial(event)
         if len(before) != 2:
             return
         bx, by = pinch_span(before)
@@ -277,6 +275,8 @@ def _(math, np, viewer):
             aim(event)
         elif event.gesture == "pinch":
             pinch(event)
+        elif event.gesture == "claw":
+            dial(event)
 
     return drive_napari, reset_view, step_channel
 
@@ -295,8 +295,9 @@ def _(HandwaveWidget, drive_napari, mo, reset_view, step_channel):
         #     "(index and thumb out) and turn your hand to turn the data. Pinch "
         #     "with both hands, then spread them apart or bring them together to "
         #     "zoom, and turn the line between them to roll the view. In 2D view, "
-        #     "pinch with one hand and twist it like a dial to step through the "
-        #     "z slices (clockwise goes deeper). Clap twice "
+        #     "grip with a claw, as if turning a doorknob (fingers straight at the "
+        #     "knuckles, curled at the tips), and twist it to step through the z "
+        #     "slices (clockwise goes deeper). Clap twice "
         #     "(clap, brief pause, clap) to reset the view. To step through the channels, point double-barrelled finger "
         #     "guns (index and middle fingers out) at each other, hold your left hand "
         #     "still, and circle your right hand like reeling in a fishing line: "

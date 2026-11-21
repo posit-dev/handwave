@@ -28,7 +28,7 @@ bundler_output_dir = pathlib.Path(__file__).parent / "static"
 
 @dataclasses.dataclass(frozen=True)
 class ClutchEvent:
-    """A clutch event (pinch, fist or finger gun), delivered to callbacks registered with
+    """A clutch event (pinch, fist, finger gun or claw), delivered to callbacks registered with
     `HandwaveWidget.on_clutch()`.
 
     A gesture is a "start" event, any number of "move" events, then an "end"
@@ -40,13 +40,15 @@ class ClutchEvent:
 
     type: typing.Literal["start", "move", "end"]
     """Phase of the gesture."""
-    gesture: typing.Literal["pinch", "fist", "gun"]
-    """Which clutch gesture produced the event: an "OK sign" pinch, a fist, or a
-    finger gun (index and thumb out, other fingers curled)."""
+    gesture: typing.Literal["pinch", "fist", "gun", "claw"]
+    """Which clutch gesture produced the event: an "OK sign" pinch, a fist, a
+    finger gun (index and thumb out, other fingers curled), or a claw (the grip
+    for turning a doorknob: fingers straight at the knuckles, curled at the
+    tips)."""
     hand: typing.Literal["Left", "Right"]
     """Which hand (subject to the usual handedness caveats)."""
     x: float
-    """Gesture point (the pinch, or the knuckles of a fist or gun), 0 (user's left) to 1
+    """Gesture point (the pinch, or the knuckles of a fist, gun or claw), 0 (user's left) to 1
     (user's right), mirrored like the preview."""
     y: float
     """Gesture point, 0 (top) to 1 (bottom)."""
@@ -61,7 +63,7 @@ class ClutchEvent:
     t: float
     """Browser timestamp, in milliseconds."""
     drotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    """Fist or finger gun (zero for a pinch): change in the hand's 3D orientation since
+    """Fist, finger gun or claw (zero for a pinch): change in the hand's 3D orientation since
     the last event, as a rotation vector (axis times angle, in radians) in screen
     coordinates: x toward the user's right, y down, z into the screen: the
     hand's physical turn, from the user's point of view. Rotate something by
@@ -145,7 +147,7 @@ class HandwaveWidget(anywidget.AnyWidget):
         self.on_msg(self._on_custom_msg)
 
     def on_clutch(self, callback: ClutchCallback, remove: bool = False):
-        """Register a callback for clutch events (pinch, fist and finger gun).
+        """Register a callback for clutch events (pinch, fist, finger gun and claw).
 
         The callback receives a `ClutchEvent`. Can be used as a decorator:
 

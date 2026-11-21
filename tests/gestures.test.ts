@@ -1363,3 +1363,81 @@ test("recorded: no reeling in other gestures", () => {
     assert.deepEqual(replayAll(name).reels, [], name);
   }
 });
+
+/** The claws in claws.json (seconds); see the fixture's description. */
+const CLAWS: Array<[number, number]> = [
+  [0.9, 4.8],
+  [6.5, 10.7],
+  [12.0, 15.7],
+];
+
+test("recorded: each doorknob claw engages once as a claw, and turns with the hand", () => {
+  const events = replay("claws.json");
+  const starts = events.filter((e) => e.type === "start");
+  const desc = starts.map((e) => `${e.gesture}@${e.t}`).join(", ");
+  assert.deepEqual(
+    starts.map((e) => e.gesture),
+    ["claw", "claw", "claw", "fist"],
+    desc
+  );
+  CLAWS.forEach(([from, to], i) => {
+    const claw = events.filter((e) => e.t >= from * 1000 && e.t <= to * 1000);
+    assert.equal(claw[0].type, "start", `claw ${i + 1}`);
+    assert.equal(claw.at(-1)!.type, "end", `claw ${i + 1}`);
+    assert.ok(claw.every((e) => e.gesture === "claw"), `claw ${i + 1}`);
+    // Each was twisted about 50 degrees each way and back.
+    let turn = 0;
+    let min = 0;
+    let max = 0;
+    for (const e of claw) {
+      turn += e.dtheta;
+      min = Math.min(min, turn);
+      max = Math.max(max, turn);
+    }
+    const deg = (r: number) => (r * 180) / Math.PI;
+    assert.ok(deg(min) < -40 && deg(max) > 40, `claw ${i + 1}: ${deg(min)}..${deg(max)} degrees`);
+  });
+});
+
+test("recorded: nothing else is a claw (relaxed or dropping hands, guns, fists, claps)", () => {
+  for (const name of [
+    "claps.json",
+    "double-claps.json",
+    "finger-gun.json",
+    "fist-shakes.json",
+    "fists-facing-camera.json",
+    "fists.json",
+    "gun-twists.json",
+    "hand-drops.json",
+    "not-fists.json",
+    "ok-signs.json",
+    "punch.json",
+    "reels.json",
+  ]) {
+    const claws = replay(name).filter((e) => e.gesture === "claw" && e.type === "start");
+    assert.deepEqual(claws.map((e) => `${e.hand}@${e.t}`), [], name);
+  }
+});
+
+test("recorded: closing a claw straight into a fist releases the claw", () => {
+  // The third claw, then (skipping the open hand between) the fist.
+  const fixture = JSON.parse(
+    readFileSync(`${import.meta.dirname}/fixtures/claws.json`, "utf8")
+  );
+  const claw = fixture.frames.filter((f: { t: number }) => f.t >= 12000 && f.t <= 15400);
+  const fist = fixture.frames.filter((f: { t: number }) => f.t >= 16900 && f.t <= 20600);
+  const shift = claw.at(-1).t + 33 - fist[0].t;
+  const tracker = new GestureTracker(undefined, 2);
+  const events: ClutchEvent[] = [];
+  for (const frame of [...claw, ...fist.map((f: { t: number }) => ({ ...f, t: f.t + shift }))]) {
+    const hands = frame.hands.map((h: { label: string; landmarks: number[][] }) => ({
+      label: h.label,
+      landmarks: h.landmarks.map(([x, y, z]) => ({ x, y, z })),
+    }));
+    events.push(...tracker.update(hands, frame.t, fixture.height / fixture.width).events);
+  }
+  assert.deepEqual(
+    events.filter((e) => e.type !== "move").map((e) => `${e.gesture} ${e.type}`),
+    ["claw start", "claw end", "fist start"]
+  );
+});

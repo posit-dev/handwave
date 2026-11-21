@@ -104,7 +104,7 @@ function lerp(a: number, b: number, alpha: number): number {
   return a + alpha * (b - a);
 }
 
-export type Gesture = "pinch" | "fist" | "gun";
+export type Gesture = "pinch" | "fist" | "gun" | "claw";
 
 export interface ClutchOptions {
   /** Pinch ratio below which a pinch engages. */
@@ -230,6 +230,38 @@ export interface ClutchOptions {
    */
   gunReleaseMs: number;
   /**
+   * Claw: the grip for turning a doorknob, fingers straight at the knuckles
+   * but curled at the tips. To engage, every knuckle (MCP) joint's angle (3D;
+   * 180 degrees is straight) must be at least `clawEngageKnuckles`, and the
+   * fingertip (DIP) joints' must average at most `clawEngageTips`, with the
+   * thumb and index fingertips apart (a pinch ratio of at least
+   * `releaseThreshold`), held nearly still for `clawEngageMs`.
+   *
+   * In recorded claws (fixture `claws.json`, palm toward the camera) the
+   * knuckles measured 158-175 degrees and the fingertips 117-149 on
+   * average. The knuckles tell a claw from a fist (121-128 on average), a
+   * relaxed hand (98-119) or a double-barrelled finger gun (ring and pinky
+   * bent there); the fingertips, from an open hand (174 or more) or an "OK"
+   * sign (158-169). Checking how far out the thumb is, as for a finger
+   * gun, made no difference in any recording.
+   */
+  clawEngageKnuckles: number;
+  clawEngageTips: number;
+  /**
+   * Like `engageMs`, for a claw. Longer than a fist's: a hand curling up as
+   * it's raised or dropped can make a real claw, briefly. In recorded hand
+   * drops, one held the claw pose, nearly still, for 230 ms.
+   */
+  clawEngageMs: number;
+  /**
+   * An engaged claw releases when the fingertips straighten (average
+   * fingertip angle above `clawReleaseTips`: an open hand measured 174 or
+   * more) or a knuckle bends (below `clawReleaseKnuckles`, as when the hand
+   * closes into a fist), for `fistReleaseFrames`.
+   */
+  clawReleaseTips: number;
+  clawReleaseKnuckles: number;
+  /**
    * Clap: two hands become one (MediaPipe reports clasped hands as a single
    * hand) between where the two were, within `clapWindowMs` of their being
    * at least `clapMinSpan` hand sizes apart (palm center to palm center;
@@ -295,6 +327,11 @@ export const defaultClutchOptions: ClutchOptions = {
   gunEngageThumb: 0.6,
   gunReleaseIndexStraightness: 0.6,
   gunReleaseMs: 100,
+  clawEngageKnuckles: 150,
+  clawEngageTips: 158,
+  clawEngageMs: 300,
+  clawReleaseTips: 170,
+  clawReleaseKnuckles: 140,
   clapMinSpan: 2,
   clapWindowMs: 300,
   doubleClapMinMs: 250,
@@ -334,12 +371,12 @@ export interface ClapEvent {
 
 export interface ClutchEvent {
   type: "start" | "move" | "end";
-  /** Which pose holds the clutch: "pinch", "fist" or "gun". */
+  /** Which pose holds the clutch: "pinch", "fist", "gun" or "claw". */
   gesture: Gesture;
   hand: string;
   /**
    * Gesture point, normalized to [0, 1] across the frame: between the
-   * fingertips for a pinch, the middle of the knuckles for a fist or gun. Mirrored
+   * fingertips for a pinch, the middle of the knuckles for a fist, gun or claw. Mirrored
    * like the preview, so x increases toward the user's right; y increases
    * downward.
    */
@@ -356,7 +393,7 @@ export interface ClutchEvent {
   /** Multiplicative change in apparent hand size; > 1 means moving closer. */
   dscale: number;
   /**
-   * Fist or finger gun (zero for a pinch): change in the hand's 3D orientation,
+   * Fist, finger gun or claw (zero for a pinch): change in the hand's 3D orientation,
    * as a rotation vector (axis times angle in radians) in screen
    * coordinates: x toward the user's right, y down, z into the screen.
    * This is the hand's physical turn, from the user's point of view; a
@@ -374,7 +411,8 @@ export interface ClutchVisual {
   hand: string;
   /**
    * The engaged gesture or, when idle, the one the hand looks closest to
-   * (curled fingers: fist, or gun with the index out; otherwise pinch).
+   * (curled fingers: fist, or gun with the index out; curled fingertips on
+   * straight knuckles: claw; otherwise pinch).
    */
   gesture: Gesture;
   /**
@@ -438,12 +476,17 @@ interface Measures {
   straightness: number;
   /** Average straightness of all four fingers. */
   fingersStraightness: number;
+  /** Smallest knuckle (MCP) joint angle of the four fingers, degrees (3D; 180 is straight). */
+  knuckleAngle: number;
+  /** Average fingertip (DIP) joint angle of the four fingers, degrees. */
+  tipAngle: number;
   wholeHandVisible: boolean;
 }
 
 /**
- * Clutch for one hand: a pinch (thumb and index fingertips together) or a
- * fist engages it, and the same pose must be held to stay engaged.
+ * Clutch for one hand: a pinch (thumb and index fingertips together), a
+ * fist, a finger gun or a claw engages it, and the same pose must be held to
+ * stay engaged.
  *
  * A pinch's openness is the pinch ratio (fingertip distance divided by palm
  * length, wrist to middle knuckle). A fist engages on its reach and releases
@@ -528,13 +571,22 @@ export class HandClutch {
     const curled =
       m.straightness <
       (opts.fistEngageStraightness + opts.engageStraightness) / 2;
+    const clawLike =
+      m.knuckleAngle >= opts.clawEngageKnuckles &&
+      m.tipAngle <= opts.clawEngageTips &&
+      m.ratio >= opts.releaseThreshold;
+    // A claw's fingers can look curled in the image, so check it first:
+    // fists, guns and relaxed hands all bend at the knuckles. (An "OK" sign
+    // can look like a claw too, but its fingertips touch.)
     const gesture: Gesture =
       this.gesture ??
-      (!curled
-        ? "pinch"
-        : m.indexReach >= opts.gunEngageIndexReach
-          ? "gun"
-          : "fist");
+      (clawLike
+        ? "claw"
+        : !curled
+          ? "pinch"
+          : m.indexReach >= opts.gunEngageIndexReach
+            ? "gun"
+            : "fist");
     const point = gesturePoint(lm, gesture);
     const visible = this.gesture
       ? gestureVisible(lm, this.gesture)
@@ -562,6 +614,10 @@ export class HandClutch {
         m.indexReach >= opts.gunEngageIndexReach &&
         m.otherFingersMaxReach <= opts.fistEngageReach &&
         m.thumbOut >= opts.gunEngageThumb;
+      const clawReady =
+        m.knuckleAngle >= opts.clawEngageKnuckles &&
+        m.tipAngle <= opts.clawEngageTips &&
+        m.ratio >= opts.releaseThreshold;
       const ready: Gesture | undefined =
         !m.wholeHandVisible || speed >= opts.engageMaxSpeed
           ? undefined
@@ -571,7 +627,9 @@ export class HandClutch {
               ? "fist"
               : gunReady
                 ? "gun"
-                : undefined;
+                : clawReady
+                  ? "claw"
+                  : undefined;
       if (ready !== this.engageGesture) {
         this.engageGesture = ready;
         this.engageSince = ready ? tMs : undefined;
@@ -581,7 +639,11 @@ export class HandClutch {
         ready !== undefined &&
         this.engageSince !== undefined &&
         tMs - this.engageSince >=
-          (ready === "pinch" ? opts.engageMs : opts.fistEngageMs)
+          (ready === "pinch"
+            ? opts.engageMs
+            : ready === "claw"
+              ? opts.clawEngageMs
+              : opts.fistEngageMs)
       ) {
         this.engageGesture = undefined;
         this.engageSince = undefined;
@@ -610,7 +672,12 @@ export class HandClutch {
           ? m.ratio
           : g === "fist"
             ? m.extension
-            : Math.max(
+            : g === "claw"
+              ? Math.max(
+                  m.tipAngle / opts.clawReleaseTips,
+                  opts.clawReleaseKnuckles / Math.max(m.knuckleAngle, 1e-6)
+                )
+              : Math.max(
                 m.otherFingersExtension,
                 opts.gunReleaseIndexStraightness /
                   Math.max(m.indexStraightness3d, 1e-6)
@@ -677,7 +744,7 @@ export class HandClutch {
           open > (opts.engageThreshold + releaseAt) / 2
         ) {
           // Loosening pinch: rebase so nothing jumps if it closes up again.
-          // Fists don't need this: their point (the knuckles) stays put as
+          // Fists (and claws) don't need this: their point (the knuckles) stays put as
           // the fingers open, while motion blur on a fast-moving fist often
           // makes it look loose for a frame, and freezing then drops the
           // movement.
@@ -700,6 +767,11 @@ export class HandClutch {
             (FIST_OPEN_REACH - m.reach) /
               (FIST_OPEN_REACH - opts.fistEngageReach)
           )
+        : shown === "claw"
+          ? clamp01(
+              (CLAW_OPEN_TIPS - m.tipAngle) /
+                (CLAW_OPEN_TIPS - opts.clawEngageTips)
+            )
         : shown === "gun"
           ? clamp01(m.thumbOut / opts.gunEngageThumb) *
             clamp01(
@@ -861,7 +933,7 @@ export class HandClutch {
       dtheta: f.angle - last.angle,
       dscale: Math.exp(f.logScale - last.logScale),
       drotation:
-        this.gesture === "gun" || this.gesture === "fist"
+        this.gesture !== "pinch"
           ? rotationVector(mulTranspose(f.orientation, last.orientation))
           : [0, 0, 0],
       t: tMs,
@@ -873,6 +945,8 @@ export class HandClutch {
 const PINCH_OPEN_RATIO = 0.8;
 /** Fist reach at which the idle progress ring is empty. */
 const FIST_OPEN_REACH = 2.0;
+/** Claw fingertip angle (degrees) at which the idle progress ring is empty. */
+const CLAW_OPEN_TIPS = 175;
 
 function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
   const fingers = FINGER_MCPS.map((mcp) =>
@@ -883,6 +957,8 @@ function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
       dist3(lm[mcp + 3], lm[WRIST], aspect) /
       Math.max(dist3(lm[mcp], lm[WRIST], aspect), 1e-6)
   );
+  const knuckles = FINGER_MCPS.map((mcp) => jointAngle(lm, WRIST, mcp, mcp + 1, aspect));
+  const tips = FINGER_MCPS.map((mcp) => jointAngle(lm, mcp + 1, mcp + 2, mcp + 3, aspect));
   return {
     ratio:
       dist3(lm[THUMB_TIP], lm[INDEX_TIP], aspect, PINCH_DEPTH_WEIGHT) /
@@ -913,13 +989,15 @@ function measure(lm: Point[], aspect: number, opts: ClutchOptions): Measures {
     ),
     straightness: (fingers[1] + fingers[2] + fingers[3]) / 3,
     fingersStraightness: (fingers[0] + fingers[1] + fingers[2] + fingers[3]) / 4,
+    knuckleAngle: Math.min(...knuckles),
+    tipAngle: tips.reduce((a, b) => a + b, 0) / tips.length,
     wholeHandVisible: lm.every((p) => insideMargin(p)),
   };
 }
 
 /**
  * Where a gesture is, in raw landmark coordinates: between the thumb and
- * index fingertips for a pinch, the middle of the four knuckles for a fist.
+ * index fingertips for a pinch, the middle of the four knuckles otherwise.
  */
 function gesturePoint(lm: Point[], gesture: Gesture): { x: number; y: number } {
   const ids = gesture === "pinch" ? [THUMB_TIP, INDEX_TIP] : FINGER_MCPS;
@@ -1462,6 +1540,19 @@ function palmCenter(lm: Point[], aspect: number): number[] {
 /** Wrist to middle knuckle, in frame widths, ignoring depth. */
 function palmLength(lm: Point[], aspect: number): number {
   return Math.hypot(lm[MIDDLE_MCP].x - lm[WRIST].x, (lm[MIDDLE_MCP].y - lm[WRIST].y) * aspect);
+}
+
+/**
+ * Angle at landmark `b` between `a` and `c`, in degrees, in 3D (180 when the
+ * three are in a line, as along a straight finger).
+ */
+function jointAngle(lm: Point[], a: number, b: number, c: number, aspect: number): number {
+  const u = [lm[a].x - lm[b].x, (lm[a].y - lm[b].y) * aspect, lm[a].z - lm[b].z];
+  const v = [lm[c].x - lm[b].x, (lm[c].y - lm[b].y) * aspect, lm[c].z - lm[b].z];
+  const n = Math.hypot(...u) * Math.hypot(...v);
+  if (n < 1e-12) return 180;
+  const cos = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / n;
+  return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI;
 }
 
 function dist3(a: Point, b: Point, aspect: number, zWeight = 1): number {

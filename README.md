@@ -67,7 +67,7 @@ This will show a widget that uses your webcam to detect hand gestures.
 
 ## Clutch gestures
 
-handwave recognizes three gestures that "clutch": a pinch, a fist and a finger gun. They all work the same way, and send the same kind of events, described under [Clutch events](#clutch-events).
+handwave recognizes four gestures that "clutch": a pinch, a fist, a finger gun and a claw. They all work the same way, and send the same kind of events, described under [Clutch events](#clutch-events).
 
 ### Pinch clutch
 
@@ -94,6 +94,10 @@ def on_clutch(event):
         turn = Rotation.from_rotvec(event.drotation)  # in screen coordinates
 ```
 
+### Claw clutch
+
+A claw is the grip for turning a doorknob: fingers straight at the knuckles but curled at the tips, thumb and index fingertips apart. It's made for turning a dial: its events have `gesture="claw"`, and `dtheta` is how far you twisted it. Hold it still for a moment to start it (about 0.3 seconds, longer than the others, because a hand curling up as you raise or drop it can briefly look like a claw), and open your hand or close it into a fist to let go.
+
 ### Clutch events
 
 ```python
@@ -107,25 +111,25 @@ def on_clutch(event):
 
 Each clutch produces a `"start"` event, then `"move"` events (one per video frame), then an `"end"` event. Each event is a `handwave.ClutchEvent` with:
 
-- **gesture**: `"pinch"`, `"fist"` or `"gun"`.
+- **gesture**: `"pinch"`, `"fist"`, `"gun"` or `"claw"`.
 - **hand**: `"Left"` or `"Right"`. Each hand has its own clutch, so two-handed gestures work with `max_num_hands=2`.
-- **x**, **y**: The pinch point (or, for a fist or finger gun, the middle of your knuckles), from 0 to 1 across the frame. x is mirrored like the preview, so it increases toward your right.
+- **x**, **y**: The pinch point (or, for a fist, finger gun or claw, the middle of your knuckles), from 0 to 1 across the frame. x is mirrored like the preview, so it increases toward your right.
 - **dx**, **dy**: Movement since the previous event, in frame widths (so horizontal and vertical movement are scaled the same). Down is positive.
 - **dtheta**: Change in hand roll since the previous event, in radians. Twist your hand like a dial; clockwise is positive.
 - **dscale**: Change in the apparent size of your hand, as a ratio. Greater than 1 means your hand moved toward the camera.
-- **drotation**: Fist or finger gun (zeros for a pinch). Change in your hand's 3D orientation from your point of view, as a rotation vector (axis times angle, in radians) in screen coordinates: x toward your right, y down, z into the screen. It relies on MediaPipe's depth estimate, so it's smoothed.
+- **drotation**: Fist, finger gun or claw (zeros for a pinch). Change in your hand's 3D orientation from your point of view, as a rotation vector (axis times angle, in radians) in screen coordinates: x toward your right, y down, z into the screen. It relies on MediaPipe's depth estimate, so it's smoothed.
 
 Use the relative values (`dx`, `dy`, `dtheta`, `dscale`) rather than absolute positions, so that releasing and re-pinching doesn't make anything jump. Movement is smoothed with a [One Euro filter](https://gery.casiez.net/1euro/).
 
-`widget.clutched_hands` lists the hands that are currently clutching with a pinch or a fist (including clutches on hold), and can be observed like any other trait.
+`widget.clutched_hands` lists the hands that are currently clutching, with any of these gestures (including clutches on hold), and can be observed like any other trait.
 
 ### What the preview shows
 
-The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment. A fist works the same way, shown as a larger rounded square at your knuckles, and a finger gun as a diamond, except that neither freezes as it loosens: your knuckles stay put as your fingers open, and a fast-moving fist often looks loose for a frame.
+The preview shows the clutch state at the pinch point: a ring that fills as your fingers close, a solid cyan dot (with a line back to where you started) while engaged, and an amber ring when the pinch loosens. Loosening the pinch freezes movement without releasing, so your fingers opening doesn't drag the data at the last moment. A fist works the same way, shown as a larger rounded square at your knuckles, a finger gun as a diamond and a claw as a knob (a larger circle with a tick), except that none of them freezes as it loosens: your knuckles stay put as your fingers open, and a fast-moving fist often looks loose for a frame.
 
 ### Losing sight of your hand
 
-If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump (unless it was gone only for a moment, under 0.2 seconds, as when MediaPipe loses a fast-moving hand for a frame: then the movement made meanwhile counts, as if your hand was never lost); bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch. For a fist, it's your four fingers (knuckles to tips) that must stay in view; your thumb and wrist can be off the edge.
+If your hand slips out of the frame mid-pinch, the clutch goes on hold rather than ending: no events are sent, and the preview shows a dashed orange ring where your hand left. There's no timeout. Bring your hand back still pinching and the clutch picks up where you are, without a jump (unless it was gone only for a moment, under 0.2 seconds, as when MediaPipe loses a fast-moving hand for a frame: then the movement made meanwhile counts, as if your hand was never lost); bring it back open (and keep it open for a moment, about 5 frames) and it ends. The same happens when only part of your hand goes past the edge: if either pinching fingertip, or the joint just below it, is outside the frame or within 4% of its edge, MediaPipe can only guess where it is, so neither the movement nor whether your fingers look pinched is trusted until both fingertips are back in view. The rest of your hand (knuckles, wrist) can be off the edge without affecting the clutch. For a fist (or a finger gun or claw), it's your four fingers (knuckles to tips) that must stay in view; your thumb and wrist can be off the edge.
 
 ### Tuning
 
